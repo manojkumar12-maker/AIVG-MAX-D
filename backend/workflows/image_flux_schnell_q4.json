@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "id": "image_flux_schnell_q4",
+    "name": "FLUX.1 schnell (quantized GGUF)",
+    "type": "image",
+    "mode": "text-to-image",
+    "description": "FLUX.1 schnell loaded as a 4-bit GGUF. Fast few-step generation. Non-commercial license — check the model page before commercial use.",
+    "requires_model": "flux_schnell_q4",
+    "min_vram_gb": 12,
+    "max_width": 1536,
+    "max_height": 1536,
+    "features": ["prompt", "seed", "steps", "aspect_ratio", "batch_size"],
+    "needs_upload": false,
+    "experimental": true,
+    "install_hint": "Requires ComfyUI-GGUF custom node. Use the notebook Model download manager (preset: Advanced) which installs it.",
+    "param_map": {
+      "prompt": {"node": "1", "field": "text"},
+      "width": {"node": "4", "field": "width"},
+      "height": {"node": "4", "field": "height"},
+      "batch_size": {"node": "4", "field": "batch_size"},
+      "steps": {"node": "3", "field": "steps"},
+      "seed": {"node": "3", "field": "seed"},
+      "model": {"node": "0", "field": "unet_name"}
+    }
+  },
+  "0": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "flux1-schnell-Q4_0.gguf"}},
+  "10": {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": "t5-v1_1-xxl-encoder-Q5_1.gguf", "type": "flux"}},
+  "11": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
+  "1": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["10", 0]}},
+  "12": {"class_type": "FluxGuidance", "inputs": {"guidance": 3.5, "conditioning": ["1", 0]}},
+  "3": {"class_type": "KSampler", "inputs": {"seed": 0, "steps": 4, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0, "model": ["0", 0], "positive": ["12", 0], "negative": ["13", 0], "latent_image": ["4", 0]}},
+  "13": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["10", 0]}},
+  "4": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+  "5": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["11", 0]}},
+  "6": {"class_type": "SaveImage", "inputs": {"images": ["5", 0], "filename_prefix": "OpenGenerativeAI/image"}}
+}

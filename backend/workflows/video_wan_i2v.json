@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "id": "video_wan_i2v",
+    "name": "Wan 2.1 I2V 14B 480p (image-to-video)",
+    "type": "video",
+    "mode": "image-to-video",
+    "description": "Animate an uploaded image with Wan 2.1 I2V 14B (480p). 24GB+ VRAM recommended; will refuse on smaller GPUs.",
+    "requires_model": "wan21_i2v_480p",
+    "min_vram_gb": 22,
+    "max_width": 832,
+    "max_height": 832,
+    "max_frames": 121,
+    "features": ["prompt", "negative_prompt", "seed", "steps", "cfg", "frames", "fps", "start_image"],
+    "needs_upload": true,
+    "experimental": true,
+    "install_hint": "Requires ComfyUI-VideoHelperSuite plus the Wan 2.1 I2V 14B weights (notebook preset: Video, Advanced tier).",
+    "param_map": {
+      "prompt": {"node": "3", "field": "text"},
+      "negative_prompt": {"node": "4", "field": "text"},
+      "width": {"node": "7", "field": "width"},
+      "height": {"node": "7", "field": "height"},
+      "frames": {"node": "7", "field": "length"},
+      "fps": {"node": "10", "field": "frame_rate"},
+      "steps": {"node": "8", "field": "steps"},
+      "cfg": {"node": "8", "field": "cfg"},
+      "seed": {"node": "8", "field": "seed"},
+      "image": {"node": "11", "field": "image"},
+      "model": {"node": "0", "field": "unet_name"}
+    }
+  },
+  "0": {"class_type": "UNETLoader", "inputs": {"unet_name": "wan2.1_i2v_480p_14B_fp16.safetensors", "weight_dtype": "default"}},
+  "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"}},
+  "2": {"class_type": "VAELoader", "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+  "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 0]}},
+  "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 0]}},
+  "7": {"class_type": "WanImageToVideo", "inputs": {"positive": ["3", 0], "negative": ["4", 0], "vae": ["2", 0], "width": 832, "height": 480, "length": 81, "batch_size": 1, "start_image": ["11", 0], "clip_vision_output": ["12", 0]}},
+  "8": {"class_type": "KSampler", "inputs": {"seed": 0, "steps": 30, "cfg": 6.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0, "model": ["0", 0], "positive": ["7", 0], "negative": ["7", 1], "latent_image": ["7", 2]}},
+  "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["2", 0]}},
+  "10": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["9", 0], "frame_rate": 16, "loop_count": 0, "filename_prefix": "OpenGenerativeAI/video", "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 19, "save_metadata": true, "pingpong": false, "save_output": true}},
+  "11": {"class_type": "LoadImage", "inputs": {"image": "input.png", "upload": "image"}},
+  "12": {"class_type": "CLIPVisionEncode", "inputs": {"crop": "center", "clip_vision": ["13", 0], "image": ["11", 0]}},
+  "13": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": "clip_vision_h.safetensors"}}
+}

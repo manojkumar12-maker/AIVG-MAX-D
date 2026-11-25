@@ -1,0 +1,50 @@
+{
+  "_meta": {
+    "id": "video_ltx_t2v",
+    "name": "LTX-Video 2B 0.9 (text-to-video, fast distilled)",
+    "type": "video",
+    "mode": "text-to-video",
+    "description": "Fast text-to-video with the distilled LTX-Video 2B model. Experimental: stock ComfyUI LTXV nodes, needs VideoHelperSuite for mp4 output.",
+    "requires_model": "ltxvideo_2b",
+    "min_vram_gb": 8,
+    "max_width": 1280,
+    "max_height": 1280,
+    "max_frames": 257,
+    "features": [
+      "prompt",
+      "negative_prompt",
+      "seed",
+      "steps",
+      "cfg",
+      "frames",
+      "fps",
+      "aspect_ratio",
+      "shorts_presets"
+    ],
+    "needs_upload": false,
+    "experimental": true,
+    "install_hint": "Requires the LTX-Video repackaged weights (notebook preset: LTX video), a T5-XXL CLIP (t5xxl_fp16.safetensors) and the ltx_video_vae; ComfyUI-VideoHelperSuite for mp4 output.",
+    "param_map": {
+      "prompt": { "node": "3", "field": "text" },
+      "negative_prompt": { "node": "4", "field": "text" },
+      "width": { "node": "7", "field": "width" },
+      "height": { "node": "7", "field": "height" },
+      "frames": { "node": "7", "field": "length" },
+      "fps": { "node": "10", "field": "frame_rate" },
+      "steps": { "node": "8", "field": "steps" },
+      "cfg": { "node": "8", "field": "cfg" },
+      "seed": { "node": "8", "field": "seed" },
+      "model": { "node": "0", "field": "unet_name" }
+    }
+  },
+  "0": { "class_type": "UNETLoader", "inputs": { "unet_name": "ltx-video-2b-v0.9.safetensors", "weight_dtype": "default" } },
+  "1": { "class_type": "CLIPLoader", "inputs": { "clip_name": "t5xxl_fp16.safetensors", "type": "ltxv", "device": "default" } },
+  "2": { "class_type": "VAELoader", "inputs": { "vae_name": "ltx_video_vae.safetensors" } },
+  "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["1", 0] } },
+  "4": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["1", 0] } },
+  "5": { "class_type": "LTXVConditioning", "inputs": { "positive": ["3", 0], "negative": ["4", 0], "frame_rate": 24 } },
+  "7": { "class_type": "EmptyLTXVLatentVideo", "inputs": { "width": 768, "height": 512, "length": 97, "batch_size": 1 } },
+  "8": { "class_type": "KSampler", "inputs": { "seed": 0, "steps": 8, "cfg": 3.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0, "model": ["0", 0], "positive": ["5", 0], "negative": ["5", 1], "latent_image": ["7", 0] } },
+  "9": { "class_type": "VAEDecode", "inputs": { "samples": ["8", 0], "vae": ["2", 0] } },
+  "10": { "class_type": "VHS_VideoCombine", "inputs": { "images": ["9", 0], "frame_rate": 24, "loop_count": 0, "filename_prefix": "OpenGenerativeAI/video", "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 19, "save_metadata": true, "pingpong": false, "save_output": true } }
+}

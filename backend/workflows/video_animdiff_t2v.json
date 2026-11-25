@@ -1,0 +1,49 @@
+{
+  "_meta": {
+    "id": "video_animdiff_t2v",
+    "name": "AnimateDiff + SD1.5 (text-to-video, 16-frame loop)",
+    "type": "video",
+    "mode": "text-to-video",
+    "description": "Short animated clips on any SD1.5 checkpoint with the AnimateDiff-Evolved motion module. Experimental: needs a custom node pack.",
+    "requires_model": "animatediff_motion_v15",
+    "min_vram_gb": 6,
+    "max_width": 768,
+    "max_height": 768,
+    "max_frames": 32,
+    "features": [
+      "prompt",
+      "negative_prompt",
+      "seed",
+      "steps",
+      "cfg",
+      "frames",
+      "fps",
+      "aspect_ratio",
+      "shorts_presets"
+    ],
+    "needs_upload": false,
+    "experimental": true,
+    "install_hint": "Requires AnimateDiff-Evolved (custom node) with mm_sd_v15_v2.ckpt, the SD1.5 checkpoint (notebook preset: SD 1.5), a matching VAE and ComfyUI-VideoHelperSuite for mp4 output.",
+    "param_map": {
+      "prompt": { "node": "3", "field": "text" },
+      "negative_prompt": { "node": "4", "field": "text" },
+      "width": { "node": "7", "field": "width" },
+      "height": { "node": "7", "field": "height" },
+      "frames": { "node": "5", "field": "batch_size" },
+      "fps": { "node": "9", "field": "frame_rate" },
+      "steps": { "node": "8", "field": "steps" },
+      "cfg": { "node": "8", "field": "cfg" },
+      "seed": { "node": "8", "field": "seed" },
+      "model": { "node": "4", "field": "model_name" }
+    }
+  },
+  "0": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "v1-5-pruned-emaonly.safetensors" } },
+  "1": { "class_type": "VAELoader", "inputs": { "vae_name": "vae-ft-mse-840000-ema-pruned.safetensors" } },
+  "2": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["0", 1] } },
+  "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["0", 1] } },
+  "4": { "class_type": "ADE_AnimateDiffLoaderGen1", "inputs": { "model_name": "mm_sd_v15_v2.ckpt", "beta_schedule": "autoselect", "model": ["0", 0] } },
+  "5": { "class_type": "ADE_EmptyLatentImage", "inputs": { "width": 512, "height": 512, "batch_size": 16 } },
+  "7": { "class_type": "KSampler", "inputs": { "seed": 0, "steps": 20, "cfg": 7.5, "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0, "model": ["4", 0], "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["5", 0] } },
+  "8": { "class_type": "VAEDecode", "inputs": { "samples": ["7", 0], "vae": ["1", 0] } },
+  "9": { "class_type": "VHS_VideoCombine", "inputs": { "images": ["8", 0], "frame_rate": 16, "loop_count": 0, "filename_prefix": "OpenGenerativeAI/video", "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 19, "save_metadata": true, "pingpong": true, "save_output": true } }
+}

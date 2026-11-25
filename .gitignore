@@ -36,3 +36,6 @@ out/
 .env
 .env.*
 !.env.example
+
+# Added by ML AI Code: build output and caches
+.pytest_cache/

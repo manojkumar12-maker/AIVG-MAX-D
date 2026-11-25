@@ -1,0 +1,39 @@
+{
+  "_meta": {
+    "id": "video_wan_t2v",
+    "name": "Wan 2.1 T2V 1.3B (text-to-video, 480p)",
+    "type": "video",
+    "mode": "text-to-video",
+    "description": "Short text-to-video clips with Wan 2.1 1.3B. Experimental: slow on T4, comfortable on 24GB+.",
+    "requires_model": "wan21_t2v_480p",
+    "min_vram_gb": 10,
+    "max_width": 832,
+    "max_height": 832,
+    "max_frames": 121,
+    "features": ["prompt", "negative_prompt", "seed", "steps", "cfg", "frames", "fps", "aspect_ratio", "shorts_presets"],
+    "needs_upload": false,
+    "experimental": true,
+    "install_hint": "Requires KJNodes-free stock ComfyUI plus the Wan 2.1 repackaged weights (notebook preset: Video) and ComfyUI-VideoHelperSuite for mp4 output.",
+    "param_map": {
+      "prompt": {"node": "3", "field": "text"},
+      "negative_prompt": {"node": "4", "field": "text"},
+      "width": {"node": "7", "field": "width"},
+      "height": {"node": "7", "field": "height"},
+      "frames": {"node": "7", "field": "length"},
+      "fps": {"node": "10", "field": "frame_rate"},
+      "steps": {"node": "8", "field": "steps"},
+      "cfg": {"node": "8", "field": "cfg"},
+      "seed": {"node": "8", "field": "seed"},
+      "model": {"node": "0", "field": "unet_name"}
+    }
+  },
+  "0": {"class_type": "UNETLoader", "inputs": {"unet_name": "wan2.1_t2v_1.3B_fp16.safetensors", "weight_dtype": "default"}},
+  "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"}},
+  "2": {"class_type": "VAELoader", "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+  "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 0]}},
+  "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 0]}},
+  "7": {"class_type": "WanImageToVideo", "inputs": {"positive": ["3", 0], "negative": ["4", 0], "vae": ["2", 0], "width": 832, "height": 480, "length": 81, "batch_size": 1}},
+  "8": {"class_type": "KSampler", "inputs": {"seed": 0, "steps": 30, "cfg": 6.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0, "model": ["0", 0], "positive": ["7", 0], "negative": ["7", 1], "latent_image": ["7", 2]}},
+  "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["2", 0]}},
+  "10": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["9", 0], "frame_rate": 16, "loop_count": 0, "filename_prefix": "OpenGenerativeAI/video", "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 19, "save_metadata": true, "pingpong": false, "save_output": true}}
+}

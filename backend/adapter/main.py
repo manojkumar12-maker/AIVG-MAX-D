@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import config, models_registry
 from .comfyui import ComfyUIClient, ComfyUIError
+from .films import FilmStore
 from .jobs import JobManager
 from .workflows import WorkflowRegistry, WorkflowValidationError
 
@@ -27,12 +28,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["X-Session-Token", "Content-Type"],
 )
 
 comfy = ComfyUIClient()
 registry = WorkflowRegistry()
+films = FilmStore()
 def _broadcast_change(job) -> None:
     if loop is not None:
         hub.broadcast(job)
@@ -483,4 +485,97 @@ async def unload_models(request: Request):
         await comfy.free_memory()
     except ComfyUIError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---- film projects ---------------------------------------------------------------
+@app.get("/api/films")
+async def list_films(request: Request):
+    await require_auth(request)
+    return {"projects": films.list()}
+
+
+@app.post("/api/films")
+async def create_film(request: Request):
+    await require_auth(request)
+    data = await request.json()
+    title = str(data.get("title", "")).strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="A project title is required.")
+    if len(title) > 120:
+        raise HTTPException(status_code=422, detail="Project title too long (max 120 characters).")
+    bible = data.get("bible") if isinstance(data.get("bible"), dict) else None
+    return films.create(title, bible)
+
+
+@app.get("/api/films/{project_id}")
+async def get_film(project_id: str, request: Request):
+    await require_auth(request)
+    project = films.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return project
+
+
+@app.patch("/api/films/{project_id}")
+async def update_film(project_id: str, request: Request):
+    await require_auth(request)
+    if films.get(project_id) is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    data = await request.json()
+    project = films.update(project_id, data)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return project
+
+
+@app.delete("/api/films/{project_id}")
+async def delete_film(project_id: str, request: Request):
+    await require_auth(request)
+    if not films.delete(project_id):
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return {"deleted": project_id}
+
+
+@app.post("/api/films/{project_id}/scenes")
+async def add_scene(project_id: str, request: Request):
+    await require_auth(request)
+    data = await request.json()
+    scene = films.add_scene(project_id, str(data.get("title", "")), str(data.get("bible_refs", "")))
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return scene
+
+
+@app.delete("/api/films/{project_id}/scenes/{scene_id}")
+async def delete_scene(project_id: str, scene_id: str, request: Request):
+    await require_auth(request)
+    if not films.delete_scene(project_id, scene_id):
+        raise HTTPException(status_code=404, detail="Scene not found.")
+    return {"deleted": scene_id}
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots")
+async def add_shot(project_id: str, scene_id: str, request: Request):
+    await require_auth(request)
+    data = await request.json()
+    prompt = str(data.get("prompt", "")).strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="A shot prompt is required.")
+    shot = films.add_shot(project_id, scene_id, prompt,
+                          model=str(data.get("model", "sd15")),
+                          params=data.get("params") if isinstance(data.get("params"), dict) else None)
+    if shot is None:
+        raise HTTPException(status_code=404, detail="Film project or scene not found.")
+    return shot
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/status")
+async def set_shot_status(project_id: str, scene_id: str, shot_id: str, request: Request):
+    await require_auth(request)
+    data = await request.json()
+    shot = films.set_shot_status(project_id, scene_id, shot_id,
+                                 str(data.get("status", "")), approved_by=data.get("approved_by"))
+    if shot is None:
+        raise HTTPException(status_code=404, detail="Shot not found or invalid status.")
+    return shot
     return {"unloaded": True}

@@ -216,17 +216,20 @@ async def _handle_generate(request: Request, kind: str, payload: dict[str, Any])
     candidates = [w for w in registry.all() if w.meta["type"] == gen_type and w.meta["mode"] == mode]
     if not candidates:
         raise HTTPException(status_code=404, detail=f"No workflow registered for {kind}.")
+    models_resp = await _models_payload()
+    model_file_map = {m["id"]: m["file"] for m in models_resp["models"] if m["installed"]}
     workflow_id = payload.get("workflow_id")
     if workflow_id:
         wf = registry.get(workflow_id)
     else:
-        non_experimental = [w for w in candidates if not w.meta.get("experimental")]
-        wf = non_experimental[0] if non_experimental else candidates[0]
+        model_id = payload.get("model")
+        model_match = [w for w in candidates if model_id and w.meta.get("requires_model") == model_id]
+        installed = [w for w in candidates if w.meta.get("requires_model", "sd15") in model_file_map]
+        pool = model_match or installed or candidates
+        non_experimental = [w for w in pool if not w.meta.get("experimental")]
+        wf = non_experimental[0] if non_experimental else pool[0]
     if wf.meta["type"] != gen_type or wf.meta["mode"] != mode:
         raise HTTPException(status_code=422, detail=f"Workflow '{wf.meta['id']}' does not match {kind}.")
-
-    models_resp = await _models_payload()
-    model_file_map = {m["id"]: m["file"] for m in models_resp["models"] if m["installed"]}
 
     min_vram = wf.meta.get("min_vram_gb")
     if min_vram:

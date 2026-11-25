@@ -1,110 +1,141 @@
-# Contributing to Open Generative AI
+# Contributing to AIVG-MAX-D
 
-Thanks for contributing. This guide covers the setup steps that are easy to
-get wrong in this repo, so a first pull request does not fail on setup alone.
+Thanks for contributing. This project is MIT licensed; by opening a pull request you agree your
+contribution can be distributed under the same licence.
 
-## Before you start
+Keep each pull request to **one concern** (one bug, one docs fix, one workflow). Do not bundle
+unrelated changes.
 
-- This repo is MIT licensed. By opening a pull request you agree your
-  contribution can be distributed under the same license.
-- Keep each pull request to **one concern** (one bug, one docs fix, one
-  component). Do not bundle unrelated changes.
-- There is currently **no CI** in this repo, so the maintainer cannot check
-  your work automatically. Run the checks below yourself before opening a PR
-  and say in the PR description which commands you ran and what they reported.
-- Do not commit API keys, tokens, or any secret. A MuAPI key is entered in
-  the app itself (see README Quick Start) and must never be pasted into code,
-  config, or a PR description.
+## What this repository actually is
 
-## Setup (from source)
+Two applications live in this repository:
 
-Prerequisites: Node.js v18+ (README Quick Start). A MuAPI key is only needed
-for cloud generations; local-model and test work does not need one.
+- **The self-hosted studio** — `frontend/` (React + Vite), `backend/` (FastAPI adapter, workflows,
+  tests), `notebooks/` (Colab GPU backend) and `docs/`. This is what the README describes.
+- **The upstream Open-Generative-AI app** — the root `app/`, `components/`, `src/`, `electron/`,
+  `packages/`, `Dockerfile`, `next.config.mjs` and root `package.json`. It is kept for reference
+  and as the original web/desktop app; it is **not wired to the self-hosted adapter**.
 
-```bash
-# Clone WITH submodules — this is required, not optional.
-# The workflow, agent, and design-agent packages live in submodules, and a
-# plain clone leaves those directories empty, which breaks the build.
-git clone --recurse-submodules https://github.com/Anil-matcha/Open-Generative-AI.git
-cd Open-Generative-AI
+Do not change the upstream app to fix a studio issue. Unless your change is explicitly about that
+app, work in `frontend/`, `backend/`, `notebooks/` or `docs/`.
 
-# If you already cloned without --recurse-submodules, run this once:
-git submodule update --init --recursive
+## Setup
 
-# Install dependencies AND build the workspace packages
-# (studio, workflow, agents). `npm install` alone is not enough.
-npm run setup
-```
-
-Then start one entry point:
+Prerequisites: Node.js 20.19+ or 22+, and Python 3.10+.
 
 ```bash
-npm run electron:dev   # Desktop app (Electron + Vite) — recommended
-npm run dev            # Web version (Next.js) → http://localhost:3000
+git clone https://github.com/manojkumar12-maker/AIVG-MAX-D.git
+cd AIVG-MAX-D
 ```
 
-If Next.js reports `Couldn't find a 'pages' directory`, check that you are
-in the repo root (the directory containing `app/`, `package.json`, and
-`next.config.mjs`) and that the submodule directories under `packages/` are
-not empty. Re-run `npm run setup` if they are.
-
-## Tests
-
-The test suite covers local inference (Electron / Wan2GP) only. It uses
-Node's built-in test runner and a fake Wan2GP fixture, so it needs no API
-key and makes no network calls to MuAPI.
+### Frontend
 
 ```bash
-npm test
+cd frontend
+npm install
+npm run dev          # http://localhost:3000
 ```
 
-This runs `node --test`, which discovers the test files in `tests/`
-(8 files, 50 tests at the time this guide was added, verified on Node 24).
-
-Note: `node --test tests/` does **not** work as a script on Node 24 — Node
-treats `tests/` as a single entry file instead of a directory. That is why
-the `test` script uses the bare `node --test` form. Do not "fix" it back
-to `node --test tests/` without verifying it on your Node version first.
-
-There are currently no tests for the MuAPI client, the studio components,
-or the Next.js proxy routes. If your change touches one of those areas,
-explain in your PR how you verified it manually (steps + what you saw),
-since `npm test` will not cover it.
-
-## Lint
+### Backend
 
 ```bash
-npm run lint
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r backend/requirements.txt pytest-asyncio
 ```
 
-Run it before opening a PR. If lint reports a pre-existing failure that is
-unrelated to your change, say so in the PR description instead of fixing
-unrelated files in the same PR.
+Run the adapter without a GPU:
+
+```bash
+export OGAI_SESSION_TOKEN=devtoken   # PowerShell: $env:OGAI_SESSION_TOKEN = "devtoken"
+python -m uvicorn backend.adapter.main:app --host 127.0.0.1 --port 8189
+```
+
+## Tests and checks
+
+```bash
+# Backend: mock ComfyUI, no GPU required
+python -m pytest backend/tests -q
+
+# Frontend: production build
+cd frontend && npm run build
+```
+
+- The only GitHub Action is the Pages deployment; there is **no automated test CI**. Run the
+  checks yourself and say in the pull request which commands you ran and what they reported.
+- `pytest-asyncio` is imported by the test suite but is not yet in `backend/requirements.txt`.
+- There is no frontend test suite and no lint script in `frontend/package.json`. At minimum, make
+  sure `npm run build` passes and check the affected screens in a browser.
+- For notebook changes, verify the JSON is valid (open it in Colab or run
+  `python -m json.tool notebooks/OpenGenerativeAI_Colab.ipynb > /dev/null`). Real generation
+  requires a GPU and cannot be verified in CI.
+
+## Changing workflows or models
+
+Workflow templates and the model registry must agree. If you change one, update the other:
+
+- `backend/workflows/*.json` — graph plus `_meta` (`id`, `type`, `mode`, `requires_model`,
+  `min_vram_gb`, `features`, `needs_upload`, `param_map`, optional limits and `experimental`).
+- `backend/adapter/models_registry.py` — id, file path, URL, VRAM, disk, licence and extra nodes.
+- `notebooks/OpenGenerativeAI_Colab.ipynb` — the preset that downloads the file.
+- `docs/WORKFLOWS.md` — the tables and any filename caveats.
+
+The current SD 1.5 and FLUX presets do not match the registry/template filenames. Aligning them is
+a welcome focused pull request; if you change the names, update all four places and the tests that
+assert template/model ids.
+
+## Changing the API
+
+- Add or update the route in `backend/adapter/main.py`.
+- Add a test in `backend/tests/test_adapter.py`.
+- Update `docs/API.md`.
+- If the frontend calls it, update `frontend/src/services/backendClient.js` and the relevant hook
+  or page.
+
+## Changing configuration
+
+Adapter configuration is environment-driven and prefixed `OGAI_`. Add new variables in
+`backend/adapter/config.py`, document them in the root README's configuration table, and pass them
+from the notebook if Colab needs them.
+
+## Documentation changes
+
+Docs live in `README.md`, `CONTRIBUTING.md` and `docs/`. The useful invariants are:
+
+- Frontend dev port **3000**, adapter port **8189**, ComfyUI port **8188**.
+- All adapter environment variables use the `OGAI_` prefix.
+- The token is sent as `X-Session-Token` (or `?token=` for media).
+- CORS defaults to `*`, not to a GitHub Pages origin.
+- Rate limit is 30 authenticated requests per 60 seconds per token.
+
+If you find a command in the docs that does not work on a clean checkout, a docs PR that fixes it
+is valuable. Include the command you ran and its output in the PR description.
+
+## What to avoid
+
+- Do not commit tokens, tunnel URLs, `.env` files, model weights, generated outputs, Drive dumps or
+  `backend/state/` contents.
+- Do not loosen authentication, CORS, upload validation or output path checks to make something
+  work locally.
+- Do not add a paid API dependency; the point of this project is self-hosted open-weight models.
+- Do not edit both the upstream app and the self-hosted studio in one pull request.
+- Do not add large binary files (images, videos, models) to git.
+- Do not "fix" unrelated lint/formatting noise in a focused PR.
 
 ## Pull request checklist
 
-- [ ] One concern only, with a clear title and description
-- [ ] `npm test` passes (or, for docs-only changes, state that no code changed)
-- [ ] `npm run lint` passes, or unrelated failures are noted
-- [ ] No API keys, tokens, or secrets added
-- [ ] Docs updated if behaviour, setup, or a command changed
-- [ ] PR description says which commands you ran and their results
+- [ ] One concern, with a clear title and description
+- [ ] `python -m pytest backend/tests -q` passes (or the PR explains why it does not)
+- [ ] `npm run build` passes in `frontend/` for UI changes
+- [ ] Docs updated when behaviour, setup, a command or a filename changed
+- [ ] No secrets, tokens, model weights or generated media added
+- [ ] The PR description says which commands you ran and their results
 
-## What to avoid in a first PR
+## Reporting issues
 
-- Do not edit `packages/studio/src/models.js` to add or rename models unless
-  you have verified the model id against the provider — it is a 35k-line
-  data file and a wrong id breaks generation silently.
-- Do not edit both UI copies of a studio (the Next.js app in `app/` and the
-  Vite/Electron app in `src/`) in one PR without checking which one the
-  change belongs to.
-- Do not loosen Electron security defaults (`webSecurity`, `contextIsolation`,
-  `nodeIntegration`) or bypass upload-proxy validation to make something work.
-- Do not change safety, moderation, lip-sync, body-swap, or influencer
-  behaviour without explicit maintainer direction.
+Include the relevant log (`/content/adapter.log`, `/content/comfyui.log`), the job error text, the
+model and workflow id, the GPU/VRAM, and whether you installed custom nodes. Do not paste live
+tunnel URLs or session tokens.
 
-## Questions
-
-If you are unsure whether an issue is still open, unassigned, or already
-has a linked PR, ask on the issue first rather than starting work that
-someone else has already claimed.
+For security issues, use a private GitHub security advisory instead of a public issue; see
+[docs/SECURITY.md](docs/SECURITY.md).

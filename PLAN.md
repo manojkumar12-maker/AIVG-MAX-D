@@ -17,7 +17,7 @@ image-to-video) through ComfyUI, see real progress, and download results.
 - `backend/workflows/` — ComfyUI API-format workflow templates with metadata.
 - `notebooks/OpenGenerativeAI_Colab.ipynb` — one-click Colab runtime.
 - `docs/` — INSTALLATION, COLAB_SETUP, API, SECURITY, WORKFLOWS, TROUBLESHOOTING.
-- `.github/workflows/deploy-frontend.yml` — GitHub Pages deployment.
+- `.github/workflows/pages.yml` — GitHub Pages deployment.
 
 ## Architecture
 - **Frontend**: React 19 + Vite, static build with configurable base path (`/open-generative-ai/`),

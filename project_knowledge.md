@@ -1,5 +1,10 @@
 # Open Generative AI: Technical Documentation & Context
 
+> **Historical notes.** This document describes the upstream Open-Generative-AI web app that uses
+> the MuAPI cloud generation service. It is kept for reference and is **not** a description of the
+> self-hosted AIVG-MAX-D studio. For the current architecture, setup and API, start at
+> [README.md](README.md) and [docs/README.md](docs/README.md).
+
 This document serves as a comprehensive knowledge base for the Open Generative AI project. It details the architecture, key components, API integration patterns, and state management strategies used in the application.
 
 ## 1. Project Vision & Overview

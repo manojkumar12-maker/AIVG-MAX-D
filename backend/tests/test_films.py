@@ -1,16 +1,12 @@
 """Phase 1 tests: Film Project data model and project API."""
 import json
 import os
-import sys
 import tempfile
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / ".."))
-
-from adapter import films as films_mod  # noqa: E402
+from backend.adapter import films as films_mod
 
 
 @pytest.fixture()
@@ -84,7 +80,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("OGAI_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("OGAI_SESSION_TOKEN", "testtoken")
     monkeypatch.setenv("OGAI_RATE_LIMIT", "1000/60")
-    from adapter import config, main
+    from backend.adapter import config, main
     import importlib
     importlib.reload(config)
     importlib.reload(main)

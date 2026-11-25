@@ -190,6 +190,60 @@ export const backendClient = {
     return request('/api/settings')
   },
 
+  listFilms() {
+    return request('/api/films')
+  },
+
+  createFilm(payload) {
+    return request('/api/films', { method: 'POST', body: payload })
+  },
+
+  getFilm(id) {
+    return request(`/api/films/${encodeURIComponent(id)}`)
+  },
+
+  deleteFilm(id) {
+    return request(`/api/films/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  },
+
+  llmProvider() {
+    return request('/api/llm/provider')
+  },
+
+  generateStage(filmId, stage, payload = {}) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/generate/${stage}`, {
+      method: 'POST',
+      body: payload,
+      timeout: 300000,
+    })
+  },
+
+  listArtifacts(filmId) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/artifacts`)
+  },
+
+  getArtifact(filmId, kind) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/artifacts/${kind}`)
+  },
+
+  approveArtifact(filmId, kind) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/artifacts/${kind}/approve`, { method: 'POST' })
+  },
+
+  unapproveArtifact(filmId, kind) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/artifacts/${kind}/unapprove`, { method: 'POST' })
+  },
+
+  activateArtifactVersion(filmId, kind, version) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/artifacts/${kind}/versions/${version}/activate`, {
+      method: 'POST',
+    })
+  },
+
+  applyBreakdown(filmId) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/apply-breakdown`, { method: 'POST' })
+  },
+
   saveSettings(payload) {
     return request('/api/settings', { method: 'POST', body: payload })
   },

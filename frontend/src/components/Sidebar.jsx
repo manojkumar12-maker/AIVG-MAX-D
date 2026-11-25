@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
-import { ImageIcon, Film, Clapperboard, Wand2, Images, History, Cpu, Settings, AudioLines, UserRound, Bot, Menu, X } from 'lucide-react'
+import { ImageIcon, Film, Clapperboard, Wand2, Images, History, Cpu, Settings, AudioLines, UserRound, Bot, Menu, X, BookOpen } from 'lucide-react'
 
 export const NAV_ITEMS = [
   { to: '/', label: 'Image Studio', icon: ImageIcon },
@@ -9,6 +9,7 @@ export const NAV_ITEMS = [
   { to: '/image-editing', label: 'Image Editing', icon: Wand2 },
   { to: '/gallery', label: 'Gallery', icon: Images },
   { to: '/history', label: 'History', icon: History },
+  { to: '/creative', label: 'Creative Studio', icon: BookOpen },
   { to: '/models', label: 'Models', icon: Cpu },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]

@@ -20,7 +20,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from . import config, models_registry
 from .comfyui import ComfyUIClient, ComfyUIError
 from .films import FilmStore
+from .creative import STAGES, run_stage
 from .jobs import JobManager
+from .llm import LLMError, get_provider
 from .workflows import WorkflowRegistry, WorkflowValidationError
 
 app = FastAPI(title="Open Generative AI backend", version=config.BACKEND_VERSION, docs_url=None, redoc_url=None)
@@ -97,6 +99,8 @@ async def require_auth(request: Request) -> str:
 async def http_exception_handler(request: Request, exc: HTTPException):
     code_map = {401: "invalid_token", 403: "forbidden", 404: "not_found", 409: "queue_full",
                 422: "validation", 429: "rate_limited", 502: "comfyui_error", 503: "backend_unavailable"}
+    if isinstance(exc.detail, dict) and "error" not in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
     if isinstance(exc.detail, dict):
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
     code = code_map.get(exc.status_code, "error")
@@ -485,6 +489,98 @@ async def unload_models(request: Request):
         await comfy.free_memory()
     except ComfyUIError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---- creative pipeline (LLM stages, no GPU) ---------------------------------------
+@app.get("/api/llm/provider")
+async def llm_provider_status(request: Request):
+    await require_auth(request)
+    provider = get_provider()
+    # Never expose the API key or base URL credentials here.
+    return {"provider": provider.name, "stages": list(STAGES)}
+
+
+@app.post("/api/films/{project_id}/generate/{stage}")
+async def generate_stage(project_id: str, stage: str, request: Request):
+    await require_auth(request)
+    data = await request.json() if await request.body() else {}
+    try:
+        entry = await run_stage(films, get_provider(), project_id, stage,
+                                brief=str(data.get("brief", "")),
+                                scene=data.get("scene"),
+                                panel_count=int(data.get("panel_count", 6)))
+    except LLMError as exc:
+        status = 404 if exc.code in ("project_missing", "scene_missing") else (
+            409 if exc.code in ("artifact_locked", "stage_dependency_not_approved", "stage_dependency_missing") else 502)
+        raise HTTPException(status_code=status, detail=exc.to_dict())
+    return {"kind": stage, **entry}
+
+
+@app.get("/api/films/{project_id}/artifacts")
+async def list_artifacts(project_id: str, request: Request):
+    await require_auth(request)
+    out = films.list_artifacts(project_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return {"artifacts": out}
+
+
+@app.get("/api/films/{project_id}/artifacts/{kind}")
+async def get_artifact(project_id: str, kind: str, request: Request, version: int | None = None):
+    await require_auth(request)
+    art = films.get_artifact(project_id, kind, version)
+    if art is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return art
+
+
+@app.patch("/api/films/{project_id}/artifacts/{kind}")
+async def edit_artifact(project_id: str, kind: str, request: Request):
+    await require_auth(request)
+    data = await request.json()
+    entry = films.edit_artifact(project_id, kind, data.get("data"))
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Artifact not found or locked (approved).")
+    return {"kind": kind, **entry}
+
+
+@app.post("/api/films/{project_id}/artifacts/{kind}/approve")
+async def approve_artifact(project_id: str, kind: str, request: Request):
+    await require_auth(request)
+    entry = films.set_artifact_status(project_id, kind, "approved")
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return {"kind": kind, "status": "approved", "version": entry["version"]}
+
+
+@app.post("/api/films/{project_id}/artifacts/{kind}/unapprove")
+async def unapprove_artifact(project_id: str, kind: str, request: Request):
+    await require_auth(request)
+    entry = films.set_artifact_status(project_id, kind, None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return {"kind": kind, "status": "draft", "version": entry["version"]}
+
+
+@app.post("/api/films/{project_id}/artifacts/{kind}/versions/{version}/activate")
+async def activate_artifact_version(project_id: str, kind: str, version: int, request: Request):
+    await require_auth(request)
+    entry = films.activate_version(project_id, kind, version)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Artifact version not found.")
+    return {"kind": kind, "active_version": version}
+
+
+@app.post("/api/films/{project_id}/apply-breakdown")
+async def apply_breakdown(project_id: str, request: Request):
+    await require_auth(request)
+    result = films.apply_breakdown(project_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail={
+            "code": "breakdown_not_approved",
+            "message": "An approved scene_breakdown artifact is required.",
+            "hint": "Generate the scene breakdown and approve it, then apply."})
+    return result
 
 
 # ---- film projects ---------------------------------------------------------------

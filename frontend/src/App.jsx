@@ -13,6 +13,7 @@ import ImageToVideo from './pages/ImageToVideo'
 import GalleryPage from './pages/GalleryPage'
 import HistoryPage from './pages/HistoryPage'
 import ModelsPage from './pages/ModelsPage'
+import CreativeStudio from './pages/CreativeStudio'
 import SettingsPage from './pages/SettingsPage'
 import Unavailable from './pages/Unavailable'
 import { Navigate } from 'react-router-dom'
@@ -57,6 +58,7 @@ export default function App() {
             <Route path="/gallery" element={studio(GalleryPage)} />
             <Route path="/history" element={studio(HistoryPage)} />
             <Route path="/models" element={studio(ModelsPage)} />
+            <Route path="/creative" element={studio(CreativeStudio)} />
             <Route path="/settings" element={studio(SettingsPage)} />
             {NAV_UNAVAILABLE.map(({ to, feature }) => (
               <Route key={to} path={to} element={<Unavailable feature={feature} />} />

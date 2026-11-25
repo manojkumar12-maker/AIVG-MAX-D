@@ -19,6 +19,8 @@ from typing import Any
 from . import config
 
 SHOT_STATUSES = ("draft", "awaiting_approval", "approved", "rejected")
+ARTIFACT_KINDS = ("concept", "treatment", "screenplay", "scene_breakdown", "storyboard")
+ARTIFACT_STATUSES = ("draft", "approved")
 
 
 def _now() -> float:
@@ -190,6 +192,190 @@ class FilmStore:
             project["updated_at"] = _now()
             self._write(project)
             return shot
+
+    # ---- artifacts (versioned creative stages) ----------------------------
+    def _ensure_artifacts(self, project: dict[str, Any]) -> None:
+        project.setdefault("artifacts", {})
+
+    def add_version(self, project_id: str, kind: str, data: Any, *,
+                    source: str = "agent", usage: dict | None = None) -> dict[str, Any] | None:
+        """Append a new version of an artifact kind and make it active.
+
+        An approved artifact is stable: the caller must unapprove it first,
+        so regeneration can never silently replace approved creative work.
+        """
+        if kind not in ARTIFACT_KINDS:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            self._ensure_artifacts(project)
+            bucket = project["artifacts"].setdefault(kind, {"versions": [], "active": None, "approved_version": None})
+            current = self._artifact_by_version(bucket, bucket.get("active"))
+            if current and current.get("status") == "approved":
+                return None
+            version = (max((v["version"] for v in bucket["versions"]), default=0)) + 1
+            entry = {
+                "version": version,
+                "data": data,
+                "source": source,
+                "status": "draft",
+                "created_at": _now(),
+            }
+            if usage:
+                entry["usage"] = usage
+            bucket["versions"].append(entry)
+            bucket["active"] = version
+            project["updated_at"] = _now()
+            self._write(project)
+            return entry
+
+    @staticmethod
+    def _artifact_by_version(bucket: dict, version: Any) -> dict | None:
+        return next((v for v in bucket.get("versions", []) if v["version"] == version), None)
+
+    def get_artifact(self, project_id: str, kind: str, version: int | None = None) -> dict | None:
+        if kind not in ARTIFACT_KINDS:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            bucket = project.get("artifacts", {}).get(kind)
+            if not bucket:
+                return None
+            entry = self._artifact_by_version(bucket, version if version is not None else bucket.get("active"))
+            if entry is None:
+                return None
+            return {
+                "kind": kind,
+                "project_id": project_id,
+                **entry,
+                "versions": [{"version": v["version"], "source": v["source"],
+                              "status": v["status"], "created_at": v["created_at"]}
+                             for v in bucket["versions"]],
+                "active_version": bucket.get("active"),
+                "approved_version": bucket.get("approved_version"),
+            }
+
+    def edit_artifact(self, project_id: str, kind: str, data: Any) -> dict | None:
+        """Manual edit of the active artifact: saves a new version, keeps history."""
+        if kind not in ARTIFACT_KINDS:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            self._ensure_artifacts(project)
+            bucket = project["artifacts"].setdefault(kind, {"versions": [], "active": None, "approved_version": None})
+            active = self._artifact_by_version(bucket, bucket.get("active"))
+            if active is None or active.get("status") == "approved":
+                return None
+            version = (max((v["version"] for v in bucket["versions"]), default=0)) + 1
+            entry = {"version": version, "data": data, "source": "user_edit",
+                     "status": "draft", "created_at": _now()}
+            bucket["versions"].append(entry)
+            bucket["active"] = version
+            project["updated_at"] = _now()
+            self._write(project)
+            return entry
+
+    def set_artifact_status(self, project_id: str, kind: str,
+                            status: str | None = None, version: int | None = None) -> dict | None:
+        """Approve (status='approved') or unapprove (status=None) the active artifact."""
+        if kind not in ARTIFACT_KINDS:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            bucket = project.get("artifacts", {}).get(kind)
+            if not bucket:
+                return None
+            entry = self._artifact_by_version(bucket, version if version is not None else bucket.get("active"))
+            if entry is None:
+                return None
+            if status == "approved":
+                entry["status"] = "approved"
+                bucket["approved_version"] = entry["version"]
+            elif status is None:
+                entry["status"] = "draft"
+                if bucket.get("approved_version") == entry["version"]:
+                    bucket["approved_version"] = None
+            else:
+                return None
+            project["updated_at"] = _now()
+            self._write(project)
+            return entry
+
+    def activate_version(self, project_id: str, kind: str, version: int) -> dict | None:
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            bucket = project.get("artifacts", {}).get(kind)
+            entry = self._artifact_by_version(bucket, version) if bucket else None
+            if entry is None:
+                return None
+            bucket["active"] = version
+            project["updated_at"] = _now()
+            self._write(project)
+            return entry
+
+    def list_artifacts(self, project_id: str) -> list[dict] | None:
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            out = []
+            for kind in ARTIFACT_KINDS:
+                bucket = project.get("artifacts", {}).get(kind)
+                if not bucket or not bucket.get("versions"):
+                    continue
+                active = self._artifact_by_version(bucket, bucket.get("active"))
+                out.append({
+                    "kind": kind,
+                    "active_version": bucket.get("active"),
+                    "approved_version": bucket.get("approved_version"),
+                    "status": active.get("status") if active else None,
+                    "version_count": len(bucket["versions"]),
+                })
+            return out
+
+    # ---- scene breakdown application -------------------------------------
+    def apply_breakdown(self, project_id: str) -> dict | None:
+        """Append scenes from the active scene_breakdown artifact.
+
+        Existing scenes (and their shots/approvals) are never deleted or
+        reordered by this — approved scenes stay stable. Returns counts.
+        """
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            bucket = project.get("artifacts", {}).get("scene_breakdown")
+            active = self._artifact_by_version(bucket, bucket.get("active")) if bucket else None
+            if active is None or active.get("status") != "approved":
+                return None
+            scenes = active["data"].get("scenes") if isinstance(active["data"], dict) else None
+            if not isinstance(scenes, list):
+                return None
+            added = 0
+            for sc in scenes:
+                scene = {
+                    "id": uuid.uuid4().hex[:8],
+                    "order": len(project["scenes"]),
+                    "title": str(sc.get("title") or sc.get("slugline") or f"Scene {len(project['scenes']) + 1}"),
+                    "bible_refs": json.dumps(sc.get("characters", [])),
+                    "breakdown": sc,
+                    "shots": [],
+                }
+                project["scenes"].append(scene)
+                added += 1
+            project["updated_at"] = _now()
+            self._write(project)
+            return {"scenes_added": added, "scene_count": len(project["scenes"])}
 
     # ---- helpers ---------------------------------------------------------
     @staticmethod

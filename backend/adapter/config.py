@@ -36,7 +36,23 @@ CORS_ORIGINS = [
 MAX_UPLOAD_BYTES = int(os.environ.get("OGAI_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 MAX_CONCURRENT_JOBS = int(os.environ.get("OGAI_MAX_CONCURRENT_JOBS", "1"))
 # (requests, window seconds) for generation endpoints, per session.
-RATE_LIMIT = (30, 60)
+# OGAI_RATE_LIMIT accepts "COUNT" or the older "COUNT/WINDOW" combined form.
+_raw_limit = os.environ.get("OGAI_RATE_LIMIT", "30")
+_requests, _, _window = _raw_limit.partition("/")
+RATE_LIMIT = (
+    int(_requests),
+    int(_window) if _window else int(os.environ.get("OGAI_RATE_WINDOW", "60")),
+)
+
+# Creative-pipeline LLM provider. Default "mock" keeps every creative stage
+# runnable offline and in tests with no paid API. The API key comes straight
+# from the environment and is never returned by any endpoint.
+LLM_PROVIDER = os.environ.get("OGAI_LLM_PROVIDER", "mock")
+LLM_MODEL = os.environ.get("OGAI_LLM_MODEL", "gpt-4o-mini")
+LLM_TEMPERATURE = float(os.environ.get("OGAI_LLM_TEMPERATURE", "0.7"))
+LLM_MAX_TOKENS = int(os.environ.get("OGAI_LLM_MAX_TOKENS", "4096"))
+LLM_TIMEOUT = float(os.environ.get("OGAI_LLM_TIMEOUT", "120"))
+LLM_RETRIES = int(os.environ.get("OGAI_LLM_RETRIES", "2"))
 
 UPLOAD_IMAGE_MIMES = {"image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp", "image/gif": "gif"}
 UPLOAD_VIDEO_MIMES = {"video/mp4": "mp4", "video/webm": "webm"}

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { BookOpen, CheckCircle2, ChevronDown, Film, Loader2, RefreshCw, Undo2, Wand2 } from 'lucide-react'
 import StudioShell from '../components/StudioShell'
 import { EmptyState } from '../components/EmptyState'
+import ShotImagePanel from './ShotImagePanel'
 import { backendClient } from '../services/backendClient'
 
 const STAGES = [
@@ -137,6 +138,36 @@ function ArtifactPanel({ film, kind, label, hint, exists, onAction, busy }) {
         </div>
       )}
     </section>
+  )
+}
+
+function ShotList({ film, onChanged, disabled }) {
+  const [project, setProject] = useState(null)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let live = true
+    backendClient.getFilm(film.id)
+      .then((data) => { if (live) setProject(data.project || data) })
+      .catch((err) => { if (live) setError(err) })
+    return () => { live = false }
+  }, [film.id, film.updated_at])
+
+  if (error) return <ErrorNote error={error} />
+  const scenes = project?.scenes || []
+  if (scenes.length === 0) {
+    return <p className="text-xs text-muted">No scenes yet — apply the scene breakdown to create shots.</p>
+  }
+  return (
+    <div className="space-y-3">
+      <h3 className="text-sm font-medium">Shots & image generation</h3>
+      {scenes.flatMap((scene) => (scene.shots || []).map((shot) => (
+        <div key={shot.id} className="space-y-2">
+          <p className="text-xs text-secondary">Scene “{scene.title}” · shot {shot.id} <span className="text-muted">({shot.status})</span></p>
+          <ShotImagePanel film={film} scene={scene} shot={shot} onChanged={onChanged} disabled={disabled} />
+        </div>
+      )))}
+    </div>
   )
 }
 
@@ -287,6 +318,7 @@ export default function CreativeStudio({ connection }) {
                 Apply scene breakdown to project scenes
               </button>
             )}
+            <ShotList film={active} onChanged={withAction(refresh)} disabled={busy} />
           </div>
         )}
       </div>

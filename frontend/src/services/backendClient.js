@@ -244,6 +244,33 @@ export const backendClient = {
     return request(`/api/films/${encodeURIComponent(filmId)}/apply-breakdown`, { method: 'POST' })
   },
 
+  shotPrompt(filmId, sceneId, shotId) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/prompt`,
+    )
+  },
+
+  generateShotImage(filmId, sceneId, shotId, payload) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/generate`,
+      { method: 'POST', body: payload, timeout: 60000 },
+    )
+  },
+
+  attachShotJob(filmId, sceneId, shotId, jobId) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/jobs/${encodeURIComponent(jobId)}/attach`,
+      { method: 'POST' },
+    )
+  },
+
+  selectShotImage(filmId, sceneId, shotId, imageId) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/images/${encodeURIComponent(imageId)}/select`,
+      { method: 'POST' },
+    )
+  },
+
   saveSettings(payload) {
     return request('/api/settings', { method: 'POST', body: payload })
   },

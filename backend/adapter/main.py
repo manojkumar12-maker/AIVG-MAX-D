@@ -23,6 +23,7 @@ from .films import FilmStore
 from .creative import STAGES, run_stage
 from .jobs import JobManager
 from .llm import LLMError, get_provider
+from .shotgen import ShotLookupError, build_shot_prompt
 from .workflows import WorkflowRegistry, WorkflowValidationError
 
 app = FastAPI(title="Open Generative AI backend", version=config.BACKEND_VERSION, docs_url=None, redoc_url=None)
@@ -265,7 +266,7 @@ async def _handle_generate(request: Request, kind: str, payload: dict[str, Any])
     params = {k: v for k, v in payload.items() if k != "workflow_id"}
     params["save_to_drive"] = bool(_load_settings().get("save_to_drive"))
     job = jobs.submit(kind, {**params, "_graph": graph})
-    return {"job_id": job.id, "status": job.status}
+    return {"job_id": job.id, "status": job.status, "workflow_id": wf.meta["id"]}
 
 
 def _apply_low_vram(graph: dict, wf) -> None:
@@ -581,6 +582,105 @@ async def apply_breakdown(project_id: str, request: Request):
             "message": "An approved scene_breakdown artifact is required.",
             "hint": "Generate the scene breakdown and approve it, then apply."})
     return result
+
+
+# ---- shot image generation (Phase 3A) ----------------------------------------------
+def _shot_or_404(project_id: str, scene_id: str, shot_id: str) -> dict[str, Any]:
+    project = films.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    scene = next((s for s in project.get("scenes", []) if s.get("id") == scene_id), None)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found.")
+    shot = next((s for s in scene.get("shots", []) if s.get("id") == shot_id), None)
+    if shot is None:
+        raise HTTPException(status_code=404, detail="Shot not found.")
+    return shot
+
+
+@app.get("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/prompt")
+async def shot_prompt(project_id: str, scene_id: str, shot_id: str, request: Request):
+    """Preview the assembled image prompt for a shot; missing context is listed."""
+    await require_auth(request)
+    _shot_or_404(project_id, scene_id, shot_id)
+    try:
+        return build_shot_prompt(films, project_id, scene_id, shot_id)
+    except ShotLookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/generate")
+async def generate_shot_image(project_id: str, scene_id: str, shot_id: str, request: Request):
+    """Submit a text-to-image job for one storyboard shot through the existing
+    JobManager/_handle_generate pipeline. An explicit user prompt always wins
+    over the assembled context prompt."""
+    await require_auth(request)
+    _shot_or_404(project_id, scene_id, shot_id)
+    data = await request.json() if await request.body() else {}
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+
+    assembled = build_shot_prompt(films, project_id, scene_id, shot_id)
+    user_prompt = str(data.get("prompt") or "").strip()
+    prompt = user_prompt or assembled["prompt"]
+    if not prompt:
+        raise HTTPException(status_code=422, detail={
+            "error": {
+                "code": "empty_prompt",
+                "message": "The shot has no prompt and no Film Project context to build one from.",
+                "hint": "Write a prompt for the shot or fill in its Film Bible context.",
+            }})
+
+    negative = str(data.get("negative_prompt") if data.get("negative_prompt") is not None
+                   else assembled["negative_prompt"] or "").strip()
+    payload = {"prompt": prompt, "negative_prompt": negative}
+    for key in ("workflow_id", "model", "seed", "steps", "cfg", "width", "height"):
+        if data.get(key) is not None:
+            payload[key] = data[key]
+
+    result = await _handle_generate(request, "image", payload)
+    generation = films.add_shot_generation(
+        project_id, scene_id, shot_id,
+        job_id=result["job_id"], workflow_id=result["workflow_id"],
+        prompt=prompt, negative_prompt=negative,
+        model=str(payload.get("model") or ""), params=payload)
+    return {"job_id": result["job_id"], "status": result["status"],
+            "workflow_id": result["workflow_id"], "generation": generation}
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/jobs/{job_id}/attach")
+async def attach_shot_job(project_id: str, scene_id: str, shot_id: str, job_id: str, request: Request):
+    """Sync a finished job's outcome onto the shot's generation record.
+
+    Safe to call repeatedly (idempotent); the UI calls it when the job poller
+    reports completion, and it doubles as status recovery after a page reload.
+    """
+    await require_auth(request)
+    _shot_or_404(project_id, scene_id, shot_id)
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.type != "image":
+        raise HTTPException(status_code=422, detail="Only image jobs can be attached to a shot.")
+    output = None
+    if job.status == "completed" and job.outputs:
+        first = job.outputs[0] if isinstance(job.outputs[0], dict) else {"filename": str(job.outputs[0])}
+        output = {"filename": first.get("filename"), "url": first.get("url")}
+    entry = films.attach_shot_output(project_id, scene_id, shot_id, job_id,
+                                     status=job.status, output=output, error=job.error)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Generation record not found for this shot.")
+    return {"generation": entry}
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/images/{image_id}/select")
+async def select_shot_image(project_id: str, scene_id: str, shot_id: str, image_id: str, request: Request):
+    """Pick which generated image is the shot's current visual; nothing deleted."""
+    await require_auth(request)
+    shot = films.select_shot_image(project_id, scene_id, shot_id, image_id)
+    if shot is None:
+        raise HTTPException(status_code=404, detail="Shot or image not found.")
+    return {"images": shot.get("images", [])}
 
 
 # ---- film projects ---------------------------------------------------------------

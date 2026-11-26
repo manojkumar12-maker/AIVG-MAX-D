@@ -394,3 +394,179 @@ class TestGeneration:
         resp = await client.delete(f"/api/jobs/{job_id}", headers=H)
         assert resp.json()["deleted"] == job_id
         assert (await client.get(f"/api/jobs/{job_id}", headers=H)).status_code == 404
+
+
+@pytest.mark.anyio
+class TestShotGeneration:
+    """Phase 3A: storyboard shot -> image generation through the existing pipeline."""
+
+    def _make_project(self, tmp_path, monkeypatch):
+        from backend.adapter import main as main_mod
+        from backend.adapter.films import FilmStore
+        store = FilmStore(root=tmp_path / "films")
+        monkeypatch.setattr(main_mod, "films", store)
+        proj = store.create("Noir Sky", bible={
+            "style_guide": "cinematic noir, rain-soaked neon, high contrast",
+            "characters": [{"name": "Nova", "appearance": "silver jacket, cropped hair",
+                            "wardrobe": "steel-toed boots"}],
+        })
+        scene = store.add_scene(proj["id"], "Rooftop chase", bible_refs="Nova sprints past antennas")
+        shot = store.add_shot(proj["id"], scene["id"], "Nova runs across the rooftop", model="sd15")
+        return store, proj, scene, shot
+
+    async def test_shot_prompt_assembles_bible_context(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        url = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/prompt"
+        assert (await client.get(url)).status_code == 401
+        body = (await client.get(url, headers=H)).json()
+        assert "cinematic noir" in body["prompt"]
+        assert "Nova: silver jacket" in body["prompt"]
+        assert "Rooftop chase" in body["prompt"]
+        assert "bible.characters" in body["context_used"] and "bible.style_guide" in body["context_used"]
+        assert body["missing"] == []
+
+    async def test_shot_prompt_reports_missing_context(self, client, tmp_path, monkeypatch):
+        from backend.adapter import main as main_mod
+        from backend.adapter.films import FilmStore
+        store = FilmStore(root=tmp_path / "films2")
+        monkeypatch.setattr(main_mod, "films", store)
+        proj = store.create("Bare Bones")
+        scene = store.add_scene(proj["id"], "Empty scene")
+        empty_shot = store.add_shot(proj["id"], scene["id"], "A lamp flickers")
+        body = (await client.get(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{empty_shot['id']}/prompt",
+            headers=H)).json()
+        assert "bible.style_guide" in body["missing"]
+        assert "bible.characters" in body["missing"]
+        assert body["prompt"]  # base shot prompt still present
+
+    async def test_shot_generate_uses_jobmanager_and_associates_records(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        url = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/generate"
+        assert (await client.post(url, json={"prompt": "x"})).status_code == 401
+        r = await client.post(url, headers=H, json={
+            "prompt": "Nova runs, user edited", "width": 512, "height": 512, "model": "sd15"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["workflow_id"].startswith("image_")
+        gen = body["generation"]
+        assert gen["job_id"] == body["job_id"] and gen["status"] == "submitted"
+        assert gen["prompt"] == "Nova runs, user edited"  # user edit wins
+        # the job really went through the existing JobManager
+        job = (await client.get(f"/api/jobs/{body['job_id']}", headers=H)).json()
+        assert job["type"] == "image"
+        for _ in range(100):
+            job = (await client.get(f"/api/jobs/{body['job_id']}", headers=H)).json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.1)
+        assert job["status"] == "completed"
+        # attach the outcome onto the shot (idempotent recovery path)
+        attach_url = url.rsplit("/generate", 1)[0] + f"/jobs/{body['job_id']}/attach"
+        assert (await client.post(attach_url)).status_code == 401
+        att = (await client.post(attach_url, headers=H)).json()["generation"]
+        assert att["status"] == "completed" and att["output"]["filename"].endswith(".png")
+        again = (await client.post(attach_url, headers=H)).json()["generation"]
+        assert again["status"] == "completed"  # idempotent, no duplicate image
+        project = store.get(proj["id"])
+        shot_doc = project["scenes"][0]["shots"][0]
+        assert len(shot_doc["images"]) == 1 and shot_doc["images"][0]["selected"] is True
+        assert shot_doc["images"][0]["job_id"] == body["job_id"]
+
+    async def test_generation_history_preserved_and_select(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        base = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}"
+        ids = []
+        for prompt in ("first take", "second take"):
+            r = await client.post(f"{base}/generate", headers=H,
+                                  json={"prompt": prompt, "width": 512, "height": 512, "model": "sd15"})
+            job_id = r.json()["job_id"]
+            for _ in range(100):
+                job = (await client.get(f"/api/jobs/{job_id}", headers=H)).json()
+                if job["status"] == "completed":
+                    break
+                time.sleep(0.1)
+            await client.post(f"{base}/jobs/{job_id}/attach", headers=H)
+            ids.append(job_id)
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert len(shot_doc["images"]) == 2  # history preserved, nothing overwritten
+        # a regeneration never silently replaces the currently selected visual
+        assert shot_doc["images"][0]["selected"] is True
+        assert shot_doc["images"][1]["selected"] is False
+        newer = shot_doc["images"][1]
+        r = await client.post(f"{base}/images/{newer['id']}/select", headers=H)
+        selected = [i for i in r.json()["images"] if i["selected"]]
+        assert len(selected) == 1 and selected[0]["id"] == newer["id"]
+        assert len(r.json()["images"]) == 2  # still nothing deleted
+
+    async def test_failed_generation_recorded_without_output(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        MockComfy.fail_prompt = True
+        try:
+            r = await client.post(
+                f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/generate",
+                headers=H, json={"prompt": "retry me", "width": 512, "height": 512, "model": "sd15"})
+            job_id = r.json()["job_id"]
+            for _ in range(100):
+                job = (await client.get(f"/api/jobs/{job_id}", headers=H)).json()
+                if job["status"] in ("failed", "completed"):
+                    break
+                time.sleep(0.1)
+            att = (await client.post(
+                f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/jobs/{job_id}/attach",
+                headers=H)).json()["generation"]
+            assert att["status"] == "failed" and att["error"]
+            shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+            assert shot_doc.get("images", []) == []  # no output attached on failure
+        finally:
+            MockComfy.fail_prompt = False
+        # retry: a new submission succeeds and the failed record stays in history
+        r = await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/generate",
+            headers=H, json={"prompt": "retry me", "width": 512, "height": 512, "model": "sd15"})
+        job_id = r.json()["job_id"]
+        for _ in range(100):
+            job = (await client.get(f"/api/jobs/{job_id}", headers=H)).json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.1)
+        await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/jobs/{job_id}/attach",
+            headers=H)
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert [g["status"] for g in shot_doc["generations"]] == ["failed", "completed"]
+        assert len(shot_doc["images"]) == 1
+
+    async def test_backend_unavailable_fails_gracefully(self, client, tmp_path, monkeypatch):
+        from backend.adapter import main as main_mod
+        from backend.adapter.comfyui import ComfyUIClient
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        monkeypatch.setattr(main_mod, "comfy", ComfyUIClient(base_url="http://127.0.0.1:1"))
+        r = await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/generate",
+            headers=H, json={"prompt": "x", "width": 512, "height": 512, "model": "sd15"})
+        assert r.status_code >= 400
+        assert r.json()["error"]["code"]  # clear error body, not a hang
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert shot_doc.get("generations", []) == []  # project data preserved, no record
+        assert shot_doc["prompt"] == "Nova runs across the rooftop"
+
+    async def test_workflow_and_shot_validation(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        base = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}"
+        assert (await client.get(f"/api/films/nope/scenes/x/shots/y/prompt", headers=H)).status_code == 404
+        assert (await client.get(f"{base.replace(shot['id'], 'nope')}/prompt", headers=H)).status_code == 404
+        bare = store.create("No Context", bible={"style_guide": "", "characters": []})
+        bare_scene = store.add_scene(bare["id"], "")
+        bare_shot = store.add_shot(bare["id"], bare_scene["id"], "")
+        # add_scene auto-titles ("Scene 1"), so a scene always contributes;
+        # with no shot prompt and no other context, that title is the whole prompt
+        body = (await client.post(
+            f"/api/films/{bare['id']}/scenes/{bare_scene['id']}/shots/{bare_shot['id']}/generate",
+            headers=H, json={})).json()
+        assert body["generation"]["prompt"]  # falls back to assembled context
+        r = await client.post(f"{base}/generate", headers=H, json={
+            "prompt": "x", "workflow_id": "../../etc/passwd", "width": 512, "height": 512, "model": "sd15"})
+        assert r.status_code in (404, 422)
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert shot_doc.get("generations", []) == []

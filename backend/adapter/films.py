@@ -193,6 +193,97 @@ class FilmStore:
             self._write(project)
             return shot
 
+    # ---- shot image generations (Phase 3A) --------------------------------
+    @staticmethod
+    def _find_shot(project: dict[str, Any], scene_id: str, shot_id: str) -> dict[str, Any] | None:
+        scene = next((s for s in project.get("scenes", []) if s.get("id") == scene_id), None)
+        if scene is None:
+            return None
+        return next((s for s in scene.get("shots", []) if s.get("id") == shot_id), None)
+
+    def add_shot_generation(self, project_id: str, scene_id: str, shot_id: str,
+                            job_id: str, workflow_id: str, prompt: str,
+                            negative_prompt: str = "", model: str = "",
+                            params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Record a submitted generation job on the shot (status: submitted)."""
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            shot = self._find_shot(project, scene_id, shot_id)
+            if shot is None:
+                return None
+            shot.setdefault("generations", []).append({
+                "job_id": job_id,
+                "workflow_id": workflow_id,
+                "model": model,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "params": params or {},
+                "status": "submitted",
+                "output": None,
+                "created_at": _now(),
+            })
+            project["updated_at"] = _now()
+            self._write(project)
+            return shot["generations"][-1]
+
+    def attach_shot_output(self, project_id: str, scene_id: str, shot_id: str,
+                           job_id: str, status: str, output: dict[str, Any] | None = None,
+                           error: str | None = None) -> dict[str, Any] | None:
+        """Update a submitted generation with its outcome.
+
+        Completed image outputs are appended to shot["images"] and the newest
+        one becomes the selected visual. Nothing is ever removed: earlier
+        generations stay in the history, and an approved shot's images are
+        never modified except by an explicit select call.
+        """
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            shot = self._find_shot(project, scene_id, shot_id)
+            if shot is None:
+                return None
+            entry = next((g for g in shot.get("generations", []) if g.get("job_id") == job_id), None)
+            if entry is None:
+                return None
+            if entry.get("status") not in ("submitted",):
+                return entry  # already attached; attaching is idempotent
+            entry["status"] = status
+            if error:
+                entry["error"] = error
+            if status == "completed" and output:
+                entry["output"] = output
+                image = {
+                    "id": uuid.uuid4().hex[:8],
+                    "job_id": job_id,
+                    "filename": output.get("filename"),
+                    "selected": False,
+                    "created_at": _now(),
+                }
+                shot.setdefault("images", []).append(image)
+                if not any(img.get("selected") for img in shot["images"][:-1]):
+                    image["selected"] = True
+            project["updated_at"] = _now()
+            self._write(project)
+            return entry
+
+    def select_shot_image(self, project_id: str, scene_id: str, shot_id: str,
+                          image_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            shot = self._find_shot(project, scene_id, shot_id)
+            if shot is None or not any(img.get("id") == image_id for img in shot.get("images", [])):
+                return None
+            for img in shot["images"]:
+                img["selected"] = img.get("id") == image_id
+            project["updated_at"] = _now()
+            self._write(project)
+            return shot
+
     # ---- artifacts (versioned creative stages) ----------------------------
     def _ensure_artifacts(self, project: dict[str, Any]) -> None:
         project.setdefault("artifacts", {})

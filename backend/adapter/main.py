@@ -24,6 +24,7 @@ from .creative import STAGES, run_stage
 from .jobs import JobManager
 from .llm import LLMError, get_provider
 from .shotgen import ShotLookupError, build_shot_prompt
+from .shotvideo import build_shot_video_prompt
 from .workflows import WorkflowRegistry, WorkflowValidationError
 
 app = FastAPI(title="Open Generative AI backend", version=config.BACKEND_VERSION, docs_url=None, redoc_url=None)
@@ -681,6 +682,114 @@ async def select_shot_image(project_id: str, scene_id: str, shot_id: str, image_
     if shot is None:
         raise HTTPException(status_code=404, detail="Shot or image not found.")
     return {"images": shot.get("images", [])}
+
+
+# ---- shot video generation (Phase 3B) ----------------------------------------------
+@app.get("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/video/prompt")
+async def shot_video_prompt(project_id: str, scene_id: str, shot_id: str, request: Request):
+    await require_auth(request)
+    _shot_or_404(project_id, scene_id, shot_id)
+    try:
+        return build_shot_video_prompt(films, project_id, scene_id, shot_id)
+    except ShotLookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/video/generate")
+async def generate_shot_video(project_id: str, scene_id: str, shot_id: str, request: Request):
+    """Submit an image-to-video job for one storyboard shot.
+
+    The start frame is the shot's selected generated image: its bytes are
+    pushed to ComfyUI's input via the existing client upload, then the job is
+    submitted through the shared _handle_generate/JobManager pipeline. No
+    second queue, no workflow changes.
+    """
+    await require_auth(request)
+    _shot_or_404(project_id, scene_id, shot_id)
+    data = await request.json() if await request.body() else {}
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+
+    assembled = build_shot_video_prompt(films, project_id, scene_id, shot_id)
+    source = assembled.get("source_image")
+    if not source or not source.get("filename"):
+        raise HTTPException(status_code=422, detail={
+            "error": {
+                "code": "no_source_image",
+                "message": "This shot has no selected generated image to animate.",
+                "hint": "Generate an image for the shot and select it first.",
+            }})
+
+    user_prompt = str(data.get("prompt") or "").strip()
+    prompt = user_prompt or assembled["prompt"]
+    if not prompt:
+        raise HTTPException(status_code=422, detail={
+            "error": {
+                "code": "empty_prompt",
+                "message": "The shot has no prompt and no Film Project context to build one from.",
+                "hint": "Write a prompt for the shot or fill in its Film Bible context.",
+            }})
+    negative = str(data.get("negative_prompt") if data.get("negative_prompt") is not None
+                   else assembled["negative_prompt"] or "").strip()
+
+    image_path = (config.OUTPUT_DIR / _safe_filename(str(source["filename"]))).resolve()
+    if config.OUTPUT_DIR.resolve() not in image_path.parents or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Selected image output not found.")
+    image_bytes = image_path.read_bytes()
+    try:
+        comfy_image = await comfy.upload(image_path.name, image_bytes, "image/png")
+    except ComfyUIError as exc:
+        raise HTTPException(status_code=502, detail={"error": {"code": "comfyui_error", "message": str(exc)}})
+
+    payload = {"prompt": prompt, "negative_prompt": negative, "image": comfy_image}
+    for key in ("workflow_id", "seed", "frames", "fps", "width", "height"):
+        if data.get(key) is not None:
+            payload[key] = data[key]
+
+    result = await _handle_generate(request, "image-to-video", payload)
+    generation = films.add_shot_video_generation(
+        project_id, scene_id, shot_id,
+        job_id=result["job_id"], workflow_id=result["workflow_id"],
+        prompt=prompt, negative_prompt=negative,
+        source_image_id=str(source.get("id") or ""), params=payload)
+    return {"job_id": result["job_id"], "status": result["status"],
+            "workflow_id": result["workflow_id"], "generation": generation}
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/video/jobs/{job_id}/attach")
+async def attach_shot_video_job(project_id: str, scene_id: str, shot_id: str, job_id: str, request: Request):
+    """Sync a finished video job's outcome onto the shot's generation record.
+
+    Safe to call repeatedly (idempotent); only jobs recorded on this exact
+    shot can be attached, so cross-project or cross-shot attachment is
+    impossible.
+    """
+    await require_auth(request)
+    _shot_or_404(project_id, scene_id, shot_id)
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.type not in ("video", "image-to-video"):
+        raise HTTPException(status_code=422, detail="Only video jobs can be attached to a shot video.")
+    output = None
+    if job.status == "completed" and job.outputs:
+        first = job.outputs[0] if isinstance(job.outputs[0], dict) else {"filename": str(job.outputs[0])}
+        output = {"filename": first.get("filename"), "url": first.get("url")}
+    entry = films.attach_shot_video_output(project_id, scene_id, shot_id, job_id,
+                                           status=job.status, output=output, error=job.error)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Video generation record not found for this shot.")
+    return {"generation": entry}
+
+
+@app.post("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/videos/{video_id}/select")
+async def select_shot_video(project_id: str, scene_id: str, shot_id: str, video_id: str, request: Request):
+    """Pick which generated video is the shot's preferred output; nothing deleted."""
+    await require_auth(request)
+    shot = films.select_shot_video(project_id, scene_id, shot_id, video_id)
+    if shot is None:
+        raise HTTPException(status_code=404, detail="Shot or video not found.")
+    return {"videos": shot.get("videos", [])}
 
 
 # ---- film projects ---------------------------------------------------------------

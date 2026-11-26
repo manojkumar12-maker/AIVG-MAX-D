@@ -284,6 +284,101 @@ class FilmStore:
             self._write(project)
             return shot
 
+    # ---- shot video generations (Phase 3B) ---------------------------------
+    def add_shot_video_generation(self, project_id: str, scene_id: str, shot_id: str,
+                                  job_id: str, workflow_id: str, prompt: str,
+                                  source_image_id: str,
+                                  negative_prompt: str = "",
+                                  params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Record a submitted video generation job on the shot (status: submitted).
+
+        The record references the source image by id; nothing is duplicated or
+        removed. Previous video generations stay in the history.
+        """
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            shot = self._find_shot(project, scene_id, shot_id)
+            if shot is None:
+                return None
+            entry = {
+                "job_id": job_id,
+                "workflow_id": workflow_id,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "source_image_id": source_image_id,
+                "params": params or {},
+                "status": "submitted",
+                "output": None,
+                "error": None,
+                "created_at": _now(),
+            }
+            shot.setdefault("video_generations", []).append(entry)
+            project["updated_at"] = _now()
+            self._write(project)
+            return entry
+
+    def attach_shot_video_output(self, project_id: str, scene_id: str, shot_id: str,
+                                 job_id: str, status: str,
+                                 output: dict[str, Any] | None = None,
+                                 error: str | None = None) -> dict[str, Any] | None:
+        """Update a submitted video generation with its outcome (idempotent).
+
+        Completed videos are appended to shot["videos"]; the first completed
+        video becomes the selected one automatically — after that, only an
+        explicit select call changes the selection. A failed generation never
+        deletes or replaces earlier videos.
+        """
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            shot = self._find_shot(project, scene_id, shot_id)
+            if shot is None:
+                return None
+            entry = next((g for g in shot.get("video_generations", [])
+                          if g.get("job_id") == job_id), None)
+            if entry is None:
+                return None
+            if entry.get("status") != "submitted":
+                return entry  # already attached; attaching is idempotent
+            entry["status"] = status
+            if error:
+                entry["error"] = error
+            if status == "completed" and output:
+                entry["output"] = output
+                video = {
+                    "id": uuid.uuid4().hex[:8],
+                    "job_id": job_id,
+                    "source_image_id": entry.get("source_image_id"),
+                    "filename": output.get("filename"),
+                    "selected": False,
+                    "created_at": _now(),
+                }
+                shot.setdefault("videos", []).append(video)
+                if not any(v.get("selected") for v in shot["videos"][:-1]):
+                    video["selected"] = True
+            project["updated_at"] = _now()
+            self._write(project)
+            return entry
+
+    def select_shot_video(self, project_id: str, scene_id: str, shot_id: str,
+                          video_id: str) -> dict[str, Any] | None:
+        """Pick which generated video is the shot's preferred output."""
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            shot = self._find_shot(project, scene_id, shot_id)
+            if shot is None or not any(v.get("id") == video_id for v in shot.get("videos", [])):
+                return None
+            for v in shot["videos"]:
+                v["selected"] = v.get("id") == video_id
+            project["updated_at"] = _now()
+            self._write(project)
+            return shot
+
     # ---- artifacts (versioned creative stages) ----------------------------
     def _ensure_artifacts(self, project: dict[str, Any]) -> None:
         project.setdefault("artifacts", {})

@@ -3,6 +3,7 @@ import { BookOpen, CheckCircle2, ChevronDown, Film, Loader2, RefreshCw, Undo2, W
 import StudioShell from '../components/StudioShell'
 import { EmptyState } from '../components/EmptyState'
 import ShotImagePanel from './ShotImagePanel'
+import ShotVideoPanel from './ShotVideoPanel'
 import { backendClient } from '../services/backendClient'
 
 const STAGES = [
@@ -165,6 +166,7 @@ function ShotList({ film, onChanged, disabled }) {
         <div key={shot.id} className="space-y-2">
           <p className="text-xs text-secondary">Scene “{scene.title}” · shot {shot.id} <span className="text-muted">({shot.status})</span></p>
           <ShotImagePanel film={film} scene={scene} shot={shot} onChanged={onChanged} disabled={disabled} />
+          <ShotVideoPanel film={film} scene={scene} shot={shot} onChanged={onChanged} disabled={disabled} />
         </div>
       )))}
     </div>

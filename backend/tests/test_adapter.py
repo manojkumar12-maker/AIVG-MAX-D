@@ -58,6 +58,18 @@ class MockComfy(BaseHTTPRequestHandler):
                 "ImageScale": {"input": {"required": {}}},
                 "VAEEncode": {"input": {"required": {}}},
                 "CheckpointLoaderSimple#2": {"input": {"required": {}}},
+                # Wan 2.1 I2V loader choices so the Phase 3B end-to-end tests can
+                # exercise the image-to-video path against the mock (model files
+                # are not really present; the workflow itself never runs).
+                "UNETLoader": {"input": {"required": {"unet_name": [["wan2.1_i2v_480p_14B_fp16.safetensors"], {}]}}},
+                "CLIPLoader": {"input": {"required": {"clip_name": [["wan_umtv5_v2_fp8_e4m3fn.safetensors"], {}]}}},
+                "VAELoader": {"input": {"required": {"vae_name": [["wan_2.1_vae.safetensors"], {}]}}},
+                # Custom node classes the Wan I2V graph needs (names only; the
+                # workflow never actually executes against the mock).
+                "CLIPVisionEncode": {"input": {"required": {}}},
+                "CLIPVisionLoader": {"input": {"required": {}}},
+                "VHS_VideoCombine": {"input": {"required": {}}},
+                "WanImageToVideo": {"input": {"required": {}}},
             })
         elif self.path.startswith("/history/prompt-ok"):
             self._json({"prompt-ok": {"status": {"status_str": "success", "completed": True},
@@ -570,3 +582,172 @@ class TestShotGeneration:
         assert r.status_code in (404, 422)
         shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
         assert shot_doc.get("generations", []) == []
+
+
+@pytest.mark.anyio
+class TestShotVideoGeneration:
+    """Phase 3B: storyboard shot -> video generation through the existing pipeline."""
+
+    def _make_project(self, tmp_path, monkeypatch):
+        from backend.adapter import main as main_mod
+        from backend.adapter.films import FilmStore
+        store = FilmStore(root=tmp_path / "films3b")
+        monkeypatch.setattr(main_mod, "films", store)
+        proj = store.create("Noir Sky", bible={
+            "style_guide": "cinematic noir, rain-soaked neon, high contrast",
+            "characters": [{"name": "Nova", "appearance": "silver jacket, cropped hair",
+                            "wardrobe": "steel-toed boots"}],
+        })
+        scene = store.add_scene(proj["id"], "Rooftop chase", bible_refs="Nova sprints past antennas")
+        shot = store.add_shot(proj["id"], scene["id"], "Nova runs across the rooftop", model="sd15",
+                              params={"camera_movement": "slow dolly forward"})
+        return store, proj, scene, shot
+
+    async def _completed_image(self, client, store, proj, scene, shot):
+        r = await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/generate",
+            headers=H, json={"prompt": "key frame", "width": 512, "height": 512, "model": "sd15"})
+        job_id = r.json()["job_id"]
+        for _ in range(100):
+            job = (await client.get(f"/api/jobs/{job_id}", headers=H)).json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.1)
+        await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/jobs/{job_id}/attach",
+            headers=H)
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        return shot_doc["images"][0]
+
+    @pytest.fixture
+    def big_gpu(self, monkeypatch):
+        # Wan I2V needs 22GB; the mock T4 reports 15GB. Report a big enough GPU
+        # so the end-to-end tests exercise the happy path (the VRAM gate
+        # itself is covered by the existing test_vram_gate_refuses_small_gpu).
+        from backend.adapter import main as main_mod
+        async def _big():
+            return {"gpu_name": "Mock A100", "gpu_vram_gb": 24.0}
+        monkeypatch.setattr(main_mod, "_gpu_info", _big)
+
+    async def test_video_prompt_assembles_motion_and_source(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        url = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/video/prompt"
+        assert (await client.get(url)).status_code == 401
+        body = (await client.get(url, headers=H)).json()
+        assert "cinematic noir" in body["prompt"] and "slow dolly forward" in body["prompt"]
+        assert "shot.params.camera_movement" in body["context_used"]
+        assert body["missing"] == ["shot.selected_image"]  # no image yet
+        assert body["source_image"] is None
+
+    async def test_video_generate_requires_selected_image(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        r = await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/video/generate",
+            headers=H, json={})
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "no_source_image"
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert shot_doc.get("video_generations", []) == []
+
+    async def test_video_generate_end_to_end_via_existing_pipeline(self, client, tmp_path, monkeypatch, big_gpu):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        image = await self._completed_image(client, store, proj, scene, shot)
+        url = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/video/generate"
+        assert (await client.post(url, json={})).status_code == 401
+        r = await client.post(url, headers=H, json={"prompt": "user edited motion", "frames": 33})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["workflow_id"] == "video_wan_i2v"
+        gen = body["generation"]
+        assert gen["status"] == "submitted" and gen["source_image_id"] == image["id"]
+        assert gen["prompt"] == "user edited motion"  # user edit wins, nothing overwritten
+        assert gen["params"]["image"] == "input.png"  # uploaded start frame reached ComfyUI
+        job = (await client.get(f"/api/jobs/{body['job_id']}", headers=H)).json()
+        assert job["type"] in ("video", "image-to-video")
+        for _ in range(100):
+            job = (await client.get(f"/api/jobs/{body['job_id']}", headers=H)).json()
+            if job["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+        assert job["status"] == "completed", job.get("error")
+
+    async def test_video_attach_idempotent_and_history_preserved(self, client, tmp_path, monkeypatch, big_gpu):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        base = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}"
+        await self._completed_image(client, store, proj, scene, shot)
+        r = await client.post(f"{base}/video/generate", headers=H, json={})
+        job_id = r.json()["job_id"]
+        for _ in range(100):
+            job = (await client.get(f"/api/jobs/{job_id}", headers=H)).json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.1)
+        att = (await client.post(f"{base}/video/jobs/{job_id}/attach", headers=H)).json()["generation"]
+        assert att["status"] == "completed" and att["output"]["filename"]
+        again = (await client.post(f"{base}/video/jobs/{job_id}/attach", headers=H)).json()["generation"]
+        assert again["status"] == "completed"  # idempotent, no duplicate video record
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert len(shot_doc["videos"]) == 1
+        assert shot_doc["videos"][0]["selected"] is True  # first completed video auto-selected
+
+    async def test_video_select_and_regeneration_keeps_history(self, client, tmp_path, monkeypatch, big_gpu):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        base = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}"
+        await self._completed_image(client, store, proj, scene, shot)
+        video_ids = []
+        for _ in range(2):
+            r = await client.post(f"{base}/video/generate", headers=H, json={})
+            job_id = r.json()["job_id"]
+            for _ in range(100):
+                job = (await client.get(f"/api/jobs/{job_id}", headers=H)).json()
+                if job["status"] == "completed":
+                    break
+                time.sleep(0.1)
+            await client.post(f"{base}/video/jobs/{job_id}/attach", headers=H)
+            shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+            video_ids.append(shot_doc["videos"][-1]["id"])
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert len(shot_doc["videos"]) == 2  # history preserved
+        assert shot_doc["videos"][0]["selected"] is True
+        r = await client.post(f"{base}/videos/{video_ids[1]}/select", headers=H)
+        assert r.status_code == 200
+        selected = [v for v in r.json()["videos"] if v["selected"]]
+        assert len(selected) == 1 and selected[0]["id"] == video_ids[1]
+        assert len(r.json()["videos"]) == 2  # nothing deleted
+
+    async def test_video_attach_rejects_foreign_jobs(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        base = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}"
+        # an image job cannot be attached as a video generation
+        r = await client.post(f"{base}/generate", headers=H,
+                              json={"prompt": "x", "width": 512, "height": 512, "model": "sd15"})
+        image_job = r.json()["job_id"]
+        resp = await client.post(f"{base}/video/jobs/{image_job}/attach", headers=H)
+        assert resp.status_code == 422
+        assert resp.json()["error"]["message"] == "Only video jobs can be attached to a shot video."
+        assert (await client.post(f"{base}/video/jobs/nope/attach", headers=H)).status_code == 404
+
+    async def test_video_workflow_id_cannot_traverse(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        await self._completed_image(client, store, proj, scene, shot)
+        r = await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/video/generate",
+            headers=H, json={"workflow_id": "../../etc/passwd"})
+        assert r.status_code in (404, 422)
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert shot_doc.get("video_generations", []) == []
+
+    async def test_video_backend_unavailable_fails_cleanly(self, client, tmp_path, monkeypatch):
+        from backend.adapter import main as main_mod
+        from backend.adapter.comfyui import ComfyUIClient
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        await self._completed_image(client, store, proj, scene, shot)
+        monkeypatch.setattr(main_mod, "comfy", ComfyUIClient(base_url="http://127.0.0.1:1"))
+        r = await client.post(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/video/generate",
+            headers=H, json={})
+        assert r.status_code >= 400
+        assert r.json()["error"]["code"]  # clear error body, not a hang
+        shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
+        assert shot_doc.get("video_generations", []) == []  # project data preserved
+

@@ -22,6 +22,7 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api/, ''),
       },
+      '/health': { target: process.env.OGAI_DEV_PROXY || 'http://127.0.0.1:8202', changeOrigin: true },
       '/ws/jobs': { target: process.env.OGAI_DEV_PROXY || 'http://127.0.0.1:8189', ws: true, changeOrigin: true },
     },
   },

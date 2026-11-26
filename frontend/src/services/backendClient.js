@@ -271,6 +271,33 @@ export const backendClient = {
     )
   },
 
+  shotVideoPrompt(filmId, sceneId, shotId) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/video/prompt`,
+    )
+  },
+
+  generateShotVideo(filmId, sceneId, shotId, payload) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/video/generate`,
+      { method: 'POST', body: payload, timeout: 60000 },
+    )
+  },
+
+  attachShotVideoJob(filmId, sceneId, shotId, jobId) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/video/jobs/${encodeURIComponent(jobId)}/attach`,
+      { method: 'POST' },
+    )
+  },
+
+  selectShotVideo(filmId, sceneId, shotId, videoId) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/videos/${encodeURIComponent(videoId)}/select`,
+      { method: 'POST' },
+    )
+  },
+
   saveSettings(payload) {
     return request('/api/settings', { method: 'POST', body: payload })
   },

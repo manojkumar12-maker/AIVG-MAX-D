@@ -18,6 +18,7 @@ from typing import Any
 
 from . import config
 from . import continuity
+from . import audio
 
 SHOT_STATUSES = ("draft", "awaiting_approval", "approved", "rejected")
 ARTIFACT_KINDS = ("concept", "treatment", "screenplay", "scene_breakdown", "storyboard")
@@ -445,6 +446,141 @@ class FilmStore:
             project["updated_at"] = _now()
             self._write(project)
             return data
+
+    # ---- audio bible, voice identity, cues (Phase 5.2) ---------------------
+    @staticmethod
+    def _ensure_audio(project: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(project.get("audio"), dict):
+            project["audio"] = {"bible": audio.empty_audio_bible(), "cues": []}
+        if not isinstance(project["audio"].get("bible"), dict):
+            project["audio"]["bible"] = audio.empty_audio_bible()
+        if not isinstance(project["audio"].get("cues"), list):
+            project["audio"]["cues"] = []
+        return project["audio"]
+
+    def get_audio(self, project_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            return self._ensure_audio(project)
+
+    def update_audio_bible(self, project_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        """Edit-only audio bible update: touches only its own five fields."""
+        data = audio.normalize_audio_bible(patch)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            store = self._ensure_audio(project)
+            store["bible"].update(data)
+            project["updated_at"] = _now()
+            self._write(project)
+            return store["bible"]
+
+    def get_character_voice(self, project_id: str, character_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            character = self._find_character(project, character_id)
+            if character is None:
+                return None
+            voice = character.get("voice")
+            return dict(audio.empty_voice(), **voice) if isinstance(voice, dict) else audio.empty_voice()
+
+    def update_character_voice(self, project_id: str, character_id: str,
+                               patch: dict[str, Any]) -> dict[str, Any] | None:
+        """Edit-only voice identity on an existing canon character.
+
+        Only ``character["voice"]`` is written: appearance, wardrobe and every
+        other canon field are left untouched. Unknown characters return None.
+        """
+        data = audio.normalize_voice(patch)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            character = self._find_character(project, character_id)
+            if character is None:
+                return None
+            merged = dict(audio.empty_voice(), **(character.get("voice") or {}))
+            merged.update(data)
+            character["voice"] = merged
+            project["updated_at"] = _now()
+            self._write(project)
+            return merged
+
+    def add_cue(self, project_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        """Append one audio cue. References to scenes, shots and characters are
+        validated against the project; unknown ids are rejected, never invented."""
+        data = audio.normalize_cue(patch)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            if not self._cue_refs_valid(project, data):
+                return None
+            store = self._ensure_audio(project)
+            if len(store["cues"]) >= audio.MAX_CUES:
+                return None
+            cue = {"id": uuid.uuid4().hex[:8], "created_at": _now(), **data}
+            store["cues"].append(cue)
+            project["updated_at"] = _now()
+            self._write(project)
+            return cue
+
+    def update_cue(self, project_id: str, cue_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        """Partial cue update: only the sent fields change, the rest and the
+        cue's stable id are preserved."""
+        data = audio.normalize_cue(patch, partial=True)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            store = self._ensure_audio(project)
+            cue = next((c for c in store["cues"] if c.get("id") == cue_id), None)
+            if cue is None:
+                return None
+            if not self._cue_refs_valid(project, {**cue, **data}):
+                return None
+            cue.update(data)
+            project["updated_at"] = _now()
+            self._write(project)
+            return cue
+
+    @staticmethod
+    def _find_character(project: dict[str, Any], character_id: str) -> dict[str, Any] | None:
+        continuity_data = project.get("continuity")
+        characters = continuity_data.get("characters", []) if isinstance(continuity_data, dict) else []
+        return next((c for c in characters if c.get("id") == character_id), None)
+
+    @staticmethod
+    def _cue_refs_valid(project: dict[str, Any], cue: dict[str, Any]) -> bool:
+        scene_id = cue.get("scene_id") or ""
+        shot_id = cue.get("shot_id") or ""
+        character_id = cue.get("character_id") or ""
+        scene = None
+        if scene_id:
+            scene = next((s for s in project.get("scenes", []) if s.get("id") == scene_id), None)
+            if scene is None:
+                return False
+        if shot_id:
+            shots = scene.get("shots", []) if scene else \
+                [s for sc in project.get("scenes", []) for s in sc.get("shots", [])]
+            if not any(s.get("id") == shot_id for s in shots):
+                return False
+        if character_id and FilmStore._find_character(project, character_id) is None:
+            return False
+        return True
 
     # ---- artifacts (versioned creative stages) ----------------------------
     def _ensure_artifacts(self, project: dict[str, Any]) -> None:

@@ -519,6 +519,108 @@ async def generate_stage(project_id: str, stage: str, request: Request):
     return {"kind": stage, **entry}
 
 
+# ---- audio bible, voice identity, cues (Phase 5.2, edit-only) -----------------------
+@app.get("/api/films/{project_id}/audio")
+async def get_audio(project_id: str, request: Request):
+    await require_auth(request)
+    data = films.get_audio(project_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return data
+
+
+@app.put("/api/films/{project_id}/audio/bible")
+async def put_audio_bible(project_id: str, request: Request):
+    """Edit-only audio bible update. Never triggers generation work."""
+    await require_auth(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    result = films.update_audio_bible(project_id, data)
+    if result is None:
+        if films.get(project_id) is None:
+            raise HTTPException(status_code=404, detail="Film project not found.")
+        raise HTTPException(status_code=422, detail="Invalid audio bible data.")
+    return {"bible": result}
+
+
+@app.get("/api/films/{project_id}/characters/{character_id}/voice")
+async def get_character_voice(project_id: str, character_id: str, request: Request):
+    await require_auth(request)
+    result = films.get_character_voice(project_id, character_id)
+    if result is None:
+        _raise_project_or_character_404(project_id, character_id)
+    return {"voice": result}
+
+
+@app.put("/api/films/{project_id}/characters/{character_id}/voice")
+async def put_character_voice(project_id: str, character_id: str, request: Request):
+    """Edit-only voice identity on an existing canon character. Never touches
+    the character's visual fields and never triggers generation work."""
+    await require_auth(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    result = films.update_character_voice(project_id, character_id, data)
+    if result is None:
+        _raise_project_or_character_404(project_id, character_id)
+        raise HTTPException(status_code=422, detail="Invalid voice data.")
+    return {"voice": result}
+
+
+@app.get("/api/films/{project_id}/audio/cues")
+async def get_audio_cues(project_id: str, request: Request):
+    await require_auth(request)
+    data = films.get_audio(project_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return {"cues": data["cues"]}
+
+
+@app.post("/api/films/{project_id}/audio/cues")
+async def post_audio_cue(project_id: str, request: Request):
+    await require_auth(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    result = films.add_cue(project_id, data)
+    if result is None:
+        if films.get(project_id) is None:
+            raise HTTPException(status_code=404, detail="Film project not found.")
+        raise HTTPException(status_code=422,
+                            detail="Invalid cue data or unknown scene/shot/character reference.")
+    return {"cue": result}
+
+
+@app.put("/api/films/{project_id}/audio/cues/{cue_id}")
+async def put_audio_cue(project_id: str, cue_id: str, request: Request):
+    await require_auth(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    result = films.update_cue(project_id, cue_id, data)
+    if result is None:
+        if films.get(project_id) is None:
+            raise HTTPException(status_code=404, detail="Film project not found.")
+        raise HTTPException(status_code=422,
+                            detail="Cue not found, or invalid data / unknown reference.")
+    return {"cue": result}
+
+
+def _raise_project_or_character_404(project_id: str, character_id: str) -> None:
+    """Raise 404 for the actually missing resource; return when both exist."""
+    if films.get(project_id) is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    project = films.get(project_id)
+    characters = (project.get("continuity") or {}).get("characters", [])
+    if not any(c.get("id") == character_id for c in characters):
+        raise HTTPException(status_code=404, detail="Character not found.")
+
+
 @app.get("/api/films/{project_id}/artifacts")
 async def list_artifacts(project_id: str, request: Request):
     await require_auth(request)

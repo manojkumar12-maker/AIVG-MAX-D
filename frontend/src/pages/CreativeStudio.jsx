@@ -4,6 +4,7 @@ import StudioShell from '../components/StudioShell'
 import { EmptyState } from '../components/EmptyState'
 import ShotImagePanel from './ShotImagePanel'
 import ShotVideoPanel from './ShotVideoPanel'
+import ContinuityPanel from './ContinuityPanel'
 import { backendClient } from '../services/backendClient'
 
 const STAGES = [
@@ -320,6 +321,13 @@ export default function CreativeStudio({ connection }) {
                 Apply scene breakdown to project scenes
               </button>
             )}
+            <section className="rounded-2xl border border-border bg-card-bg p-4">
+              <h3 className="mb-1 text-sm font-medium">Visual Continuity</h3>
+              <p className="mb-3 text-xs text-muted">
+                Film canon used when assembling shot prompts. Editing never triggers generation.
+              </p>
+              <ContinuityPanel filmId={active.id} api={backendClient} />
+            </section>
             <ShotList film={active} onChanged={withAction(refresh)} disabled={busy} />
           </div>
         )}

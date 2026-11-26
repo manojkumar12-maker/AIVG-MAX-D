@@ -41,7 +41,7 @@ export default function App() {
 
   const footer = (
     <div className="space-y-2">
-      <ConnectionStatus status={connection.status} error={connection.error} onOpen={() => {}} />
+      <ConnectionStatus status={connection.status} error={connection.error} onOpen={() => { window.location.hash = '#/settings' }} />
     </div>
   )
 

@@ -21,6 +21,7 @@ from . import config, models_registry
 from .comfyui import ComfyUIClient, ComfyUIError
 from .films import FilmStore
 from .creative import STAGES, run_stage
+from . import continuity
 from .jobs import JobManager
 from .llm import LLMError, get_provider
 from .shotgen import ShotLookupError, build_shot_prompt
@@ -597,6 +598,84 @@ def _shot_or_404(project_id: str, scene_id: str, shot_id: str) -> dict[str, Any]
     if shot is None:
         raise HTTPException(status_code=404, detail="Shot not found.")
     return shot
+
+
+# ---- continuity (Phase 4) -----------------------------------------------------------
+@app.get("/api/films/{project_id}/continuity")
+async def get_film_continuity(project_id: str, request: Request):
+    await require_auth(request)
+    data = films.get_continuity(project_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return {"continuity": data}
+
+
+@app.put("/api/films/{project_id}/continuity")
+async def put_film_continuity(project_id: str, request: Request):
+    """Edit-only film canon. Never triggers generation work."""
+    await require_auth(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    result = films.update_film_continuity(project_id, data)
+    if result is None:
+        project = films.get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Film project not found.")
+        raise HTTPException(status_code=422, detail="Invalid continuity data.")
+    return {"continuity": result}
+
+
+def _scene_or_404(project_id: str, scene_id: str) -> dict[str, Any]:
+    project = films.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    scene = next((s for s in project.get("scenes", []) if s.get("id") == scene_id), None)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found.")
+    return scene
+
+
+@app.put("/api/films/{project_id}/scenes/{scene_id}/continuity")
+async def put_scene_continuity(project_id: str, scene_id: str, request: Request):
+    await require_auth(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    result = films.update_scene_continuity(project_id, scene_id, data)
+    if result is None:
+        _scene_or_404(project_id, scene_id)
+        raise HTTPException(status_code=422, detail="Invalid continuity override data.")
+    return {"continuity": result}
+
+
+@app.put("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/continuity")
+async def put_shot_continuity(project_id: str, scene_id: str, shot_id: str, request: Request):
+    await require_auth(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    result = films.update_shot_continuity(project_id, scene_id, shot_id, data)
+    if result is None:
+        _shot_or_404(project_id, scene_id, shot_id)
+        raise HTTPException(status_code=422, detail="Invalid continuity override data.")
+    return {"continuity": result}
+
+
+@app.get("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/continuity")
+async def shot_continuity_context(project_id: str, scene_id: str, shot_id: str, request: Request):
+    """Preview the resolved continuity context and the exact prompt fragments
+    a generation would receive. Read-only: no generation is triggered."""
+    await require_auth(request)
+    _shot_or_404(project_id, scene_id, shot_id)
+    project = films.get(project_id)
+    scene = next((s for s in project.get("scenes", []) if s.get("id") == scene_id), None)
+    shot = next((s for s in scene.get("shots", []) if s.get("id") == shot_id), None)
+    resolved = continuity.resolve_continuity(project, scene, shot)
+    return {"context": resolved, "parts": continuity.continuity_parts(resolved)}
 
 
 @app.get("/api/films/{project_id}/scenes/{scene_id}/shots/{shot_id}/prompt")

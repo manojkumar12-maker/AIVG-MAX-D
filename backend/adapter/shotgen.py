@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import continuity
+
 BASE_LIMIT = 1200
 PART_LIMIT = 400
 CHARACTER_LIMIT = 300
@@ -92,6 +94,19 @@ def build_shot_prompt(store, project_id: str, scene_id: str, shot_id: str) -> di
         context_used.append("scene.bible_refs")
     else:
         missing.append("scene.bible_refs")
+
+    # Phase 4: resolved continuity (film canon -> scene -> shot). Canon-backed
+    # text only; the shot's own prompt stays first and is never overwritten.
+    resolved = continuity.resolve_continuity(project, scene, shot)
+    continuity_frags = continuity.continuity_parts(resolved)
+    if continuity_frags:
+        parts.extend(continuity_frags)
+        context_used.append("continuity")
+    for warning in resolved.get("warnings", []):
+        missing.append(f"warning: {warning}")
+    for entry in resolved.get("missing", []):
+        if entry not in missing:
+            missing.append(entry)
 
     prompt = base
     for part in parts:

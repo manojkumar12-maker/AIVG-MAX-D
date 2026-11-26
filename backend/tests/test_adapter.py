@@ -751,3 +751,96 @@ class TestShotVideoGeneration:
         shot_doc = store.get(proj["id"])["scenes"][0]["shots"][0]
         assert shot_doc.get("video_generations", []) == []  # project data preserved
 
+
+
+class TestContinuity:
+    """Phase 4: continuity edit endpoints and prompt-context preview."""
+
+    def _make_project(self, tmp_path, monkeypatch):
+        from backend.adapter import main as main_mod
+        from backend.adapter.films import FilmStore
+        store = FilmStore(root=tmp_path / "films4")
+        monkeypatch.setattr(main_mod, "films", store)
+        proj = store.create("Continuity Film", bible={
+            "style_guide": "cinematic noir",
+            "characters": [{"name": "Nova", "appearance": "silver jacket"}],
+        })
+        scene = store.add_scene(proj["id"], "Rooftop", bible_refs="Nova sprints")
+        shot = store.add_shot(proj["id"], scene["id"], "Nova runs", model="sd15")
+        return store, proj, scene, shot
+
+    @pytest.mark.anyio
+    async def test_film_continuity_roundtrip_and_validation(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        url = f"/api/films/{proj['id']}/continuity"
+        assert (await client.get(url)).status_code == 401  # auth required
+
+        r = await client.put(url, headers=H, json={
+            "style": "cold palette",
+            "characters": [{"id": "c1", "name": "Nova", "appearance": "tall, red scarf"}],
+            "wardrobe": [{"id": "w1", "label": "raincoat", "description": "wet blue raincoat"}],
+        })
+        assert r.status_code == 200
+        assert r.json()["continuity"]["characters"][0]["wardrobe_id"] == ""
+
+        r2 = await client.put(url, headers=H, json={"characters": [{"name": ""}]})
+        assert r2.status_code == 422
+        assert (await client.get(f"/api/films/nonexistent/continuity", headers=H)).status_code == 404
+
+    @pytest.mark.anyio
+    async def test_override_endpoints_and_unknown_refs_404(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        surl = f"/api/films/{proj['id']}/scenes/{scene['id']}/continuity"
+        r = await client.put(surl, headers=H, json={"conditions": "dusk, heavy rain", "location_id": "lX"})
+        assert r.status_code == 200
+        shurl = f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/continuity"
+        r2 = await client.put(shurl, headers=H, json={"character_ids": ["cX"]})
+        assert r2.status_code == 200
+
+        ctx = await client.get(shurl, headers=H)
+        body = ctx.json()
+        assert ctx.status_code == 200
+        assert body["context"]["conditions"] == "dusk, heavy rain"
+        assert any("unknown character_ids" in w for w in body["context"]["warnings"])
+        assert body["parts"] == ["dusk, heavy rain"]  # unknown canon ids never leak in
+
+        assert (await client.put(f"/api/films/{proj['id']}/scenes/other/continuity",
+                                 headers=H, json={})).status_code == 404
+        assert (await client.put(f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/other/continuity",
+                                 headers=H, json={})).status_code == 404
+
+    @pytest.mark.anyio
+    async def test_continuity_reaches_shot_prompts_and_video(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        await client.put(f"/api/films/{proj['id']}/continuity", headers=H, json={
+            "characters": [{"id": "c1", "name": "Nova", "appearance": "red scarf"}],
+            "wardrobe": [{"id": "w1", "label": "raincoat", "description": "wet blue raincoat"}],
+        })
+        await client.put(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/continuity",
+            headers=H, json={"character_ids": ["c1"], "wardrobe": {"c1": "w1"}})
+        body = (await client.get(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/prompt",
+            headers=H)).json()
+        assert "Nova: red scarf wet blue raincoat" in body["prompt"]
+        assert "continuity" in body["context_used"]
+
+        vbody = (await client.get(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/video/prompt",
+            headers=H)).json()
+        assert "Nova: red scarf wet blue raincoat" in vbody["prompt"]
+
+    @pytest.mark.anyio
+    async def test_continuity_edit_never_triggers_generation_or_touches_history(self, client, tmp_path, monkeypatch):
+        store, proj, scene, shot = self._make_project(tmp_path, monkeypatch)
+        before = store.get(proj["id"])
+        await client.put(f"/api/films/{proj['id']}/continuity", headers=H, json={"style": "x"})
+        await client.put(f"/api/films/{proj['id']}/scenes/{scene['id']}/continuity", headers=H, json={})
+        await client.put(
+            f"/api/films/{proj['id']}/scenes/{scene['id']}/shots/{shot['id']}/continuity",
+            headers=H, json={"conditions": "fog"})
+        after = store.get(proj["id"])
+        assert before["scenes"][0]["shots"][0].get("images", []) == after["scenes"][0]["shots"][0].get("images", [])
+        assert after["continuity"]["style"] == "x"
+        assert after["scenes"][0]["continuity"]["location_id"] == ""
+        assert after["scenes"][0]["shots"][0]["continuity"]["conditions"] == "fog"

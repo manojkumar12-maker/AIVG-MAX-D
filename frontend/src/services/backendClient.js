@@ -250,6 +250,36 @@ export const backendClient = {
     )
   },
 
+  getFilmContinuity(filmId) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/continuity`)
+  },
+
+  updateFilmContinuity(filmId, payload) {
+    return request(`/api/films/${encodeURIComponent(filmId)}/continuity`, {
+      method: 'PUT', body: payload,
+    })
+  },
+
+  updateSceneContinuity(filmId, sceneId, payload) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/continuity`,
+      { method: 'PUT', body: payload },
+    )
+  },
+
+  updateShotContinuity(filmId, sceneId, shotId, payload) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/continuity`,
+      { method: 'PUT', body: payload },
+    )
+  },
+
+  shotContinuityContext(filmId, sceneId, shotId) {
+    return request(
+      `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/continuity`,
+    )
+  },
+
   generateShotImage(filmId, sceneId, shotId, payload) {
     return request(
       `/api/films/${encodeURIComponent(filmId)}/scenes/${encodeURIComponent(sceneId)}/shots/${encodeURIComponent(shotId)}/generate`,

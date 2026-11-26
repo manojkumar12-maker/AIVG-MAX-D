@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
+from . import continuity
 
 SHOT_STATUSES = ("draft", "awaiting_approval", "approved", "rejected")
 ARTIFACT_KINDS = ("concept", "treatment", "screenplay", "scene_breakdown", "storyboard")
@@ -378,6 +379,72 @@ class FilmStore:
             project["updated_at"] = _now()
             self._write(project)
             return shot
+
+    # ---- continuity (Phase 4) ----------------------------------------------
+    @staticmethod
+    def _ensure_continuity(project: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(project.get("continuity"), dict):
+            project["continuity"] = continuity.empty_continuity()
+        return project["continuity"]
+
+    def get_continuity(self, project_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            return self._ensure_continuity(project)
+
+    def update_film_continuity(self, project_id: str,
+                               patch: dict[str, Any]) -> dict[str, Any] | None:
+        """Replace film-level canon with a validated continuity block.
+
+        Edit-only: never touches scenes, shots, generations or selections.
+        Returns ``None`` when the project is unknown or the patch is malformed.
+        """
+        from . import continuity
+        data = continuity.normalize_film_continuity(patch)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            project["continuity"] = data
+            project["updated_at"] = _now()
+            self._write(project)
+            return data
+
+    def update_scene_continuity(self, project_id: str, scene_id: str,
+                                patch: dict[str, Any]) -> dict[str, Any] | None:
+        from . import continuity
+        data = continuity.normalize_override(patch)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            scene = self._find_scene(project, scene_id) if project else None
+            if scene is None:
+                return None
+            scene["continuity"] = data
+            project["updated_at"] = _now()
+            self._write(project)
+            return data
+
+    def update_shot_continuity(self, project_id: str, scene_id: str, shot_id: str,
+                               patch: dict[str, Any]) -> dict[str, Any] | None:
+        from . import continuity
+        data = continuity.normalize_override(patch)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            shot = self._find_shot(project, scene_id, shot_id) if project else None
+            if shot is None:
+                return None
+            shot["continuity"] = data
+            project["updated_at"] = _now()
+            self._write(project)
+            return data
 
     # ---- artifacts (versioned creative stages) ----------------------------
     def _ensure_artifacts(self, project: dict[str, Any]) -> None:

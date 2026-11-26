@@ -19,9 +19,11 @@ from typing import Any
 from . import config
 from . import continuity
 from . import audio
+from . import dialogue
 
 SHOT_STATUSES = ("draft", "awaiting_approval", "approved", "rejected")
-ARTIFACT_KINDS = ("concept", "treatment", "screenplay", "scene_breakdown", "storyboard")
+ARTIFACT_KINDS = ("concept", "treatment", "screenplay", "scene_breakdown",
+                  "storyboard", "dialogue")
 ARTIFACT_STATUSES = ("draft", "approved")
 
 
@@ -582,6 +584,104 @@ class FilmStore:
             return False
         return True
 
+    # ---- dialogue pipeline (Phase 5.3) --------------------------------------
+    @staticmethod
+    def _scene_id_for_number(project: dict[str, Any], scene_number: int) -> str:
+        """Map a screenplay scene number to a project scene via its applied
+        breakdown; scenes created manually have no link and stay unresolved."""
+        for scene in project.get("scenes", []):
+            if (scene.get("breakdown") or {}).get("number") == scene_number:
+                return scene.get("id") or ""
+        return ""
+
+    def replace_dialogue(self, project_id: str, source_screenplay_version: int,
+                         verified_lines: list[dict[str, Any]]) -> dict | None:
+        """Store verified lines as the draft dialogue artifact version.
+
+        Idempotent: line ids are deterministic, and re-extracting the same
+        screenplay version over an unapproved draft with the same line-id set
+        is a no-op — no duplicate records or versions. An approved dialogue
+        artifact is never touched (must be unapproved first), matching the
+        add_version convention.
+        """
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            characters = (project.get("continuity") or {}).get("characters", [])
+            lines = []
+            for order, line in enumerate(verified_lines):
+                lines.append({
+                    "id": dialogue.stable_line_id(source_screenplay_version,
+                                                  line["scene_number"], order,
+                                                  line["text"]),
+                    "scene_number": line["scene_number"],
+                    "scene_id": self._scene_id_for_number(project, line["scene_number"]),
+                    "character_id": line.get("character_id") or "",
+                    "speaker_name": line["speaker_name"],
+                    "speaker_resolved": bool(line.get("speaker_resolved")),
+                    "text": line["text"],
+                    "line_type": line["line_type"],
+                    "delivery_note": line.get("delivery_note") or "",
+                    "emotion": line.get("emotion") or "",
+                    "notes": "",
+                })
+            data = {"source_screenplay_version": source_screenplay_version,
+                    "lines": lines}
+            current = self._artifact_entry(project, "dialogue")
+            if current and current.get("status") == "approved":
+                return None
+            if current and current.get("data", {}).get("source_screenplay_version") == source_screenplay_version \
+                    and {ln["id"] for ln in current["data"].get("lines", [])} == {ln["id"] for ln in lines}:
+                return current  # idempotent re-run: nothing changed
+        # add_version takes the lock itself: call it outside our critical section
+        return self.add_version(project_id, "dialogue", data)
+
+    def get_dialogue(self, project_id: str) -> dict | None:
+        """Active dialogue artifact plus its current validation report."""
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            entry = self._artifact_entry(project, "dialogue")
+        if entry is None:
+            return {"lines": [], "version": None, "status": None,
+                    "problems": ["no dialogue extracted yet"], "reports": []}
+        lines = entry.get("data", {}).get("lines", [])
+        return {**entry,
+                "lines": lines,
+                "source_screenplay_version": entry.get("data", {}).get("source_screenplay_version"),
+                "problems": dialogue.validate_for_approval(lines),
+                "reports": []}
+
+    def update_dialogue_line(self, project_id: str, line_id: str,
+                             patch: dict[str, Any]) -> dict | None:
+        """Edit one line's text/metadata in place on the active draft.
+
+        Editing an approved artifact is refused (unapprove first), matching the
+        existing approved-artifact convention. The line's id and resolved
+        references are preserved; a changed text is allowed but the line keeps
+        its source linkage.
+        """
+        data = dialogue.normalize_line_patch(patch)
+        if data is None:
+            return None
+        with self.lock:
+            project = self._read(project_id)
+            if project is None:
+                return None
+            entry = self._artifact_entry(project, "dialogue")
+            if entry is None or entry.get("status") == "approved":
+                return None
+            lines = entry["data"].get("lines", [])
+            line = next((ln for ln in lines if ln.get("id") == line_id), None)
+            if line is None:
+                return None
+            line.update(data)
+            project["updated_at"] = _now()
+            self._write(project)
+            return line
+
     # ---- artifacts (versioned creative stages) ----------------------------
     def _ensure_artifacts(self, project: dict[str, Any]) -> None:
         project.setdefault("artifacts", {})
@@ -647,6 +747,14 @@ class FilmStore:
                 "active_version": bucket.get("active"),
                 "approved_version": bucket.get("approved_version"),
             }
+
+    def _artifact_entry(self, project: dict[str, Any], kind: str) -> dict | None:
+        """Active artifact entry for a project already read under the lock
+        (lock-free variant of get_artifact for internal composition)."""
+        bucket = project.get("artifacts", {}).get(kind)
+        if not bucket:
+            return None
+        return self._artifact_by_version(bucket, bucket.get("active"))
 
     def edit_artifact(self, project_id: str, kind: str, data: Any) -> dict | None:
         """Manual edit of the active artifact: saves a new version, keeps history."""

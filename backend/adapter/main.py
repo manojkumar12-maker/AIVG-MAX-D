@@ -22,6 +22,7 @@ from .comfyui import ComfyUIClient, ComfyUIError
 from .films import FilmStore
 from .creative import STAGES, run_stage
 from . import continuity
+from . import dialogue
 from .jobs import JobManager
 from .llm import LLMError, get_provider
 from .shotgen import ShotLookupError, build_shot_prompt
@@ -611,6 +612,97 @@ async def put_audio_cue(project_id: str, cue_id: str, request: Request):
     return {"cue": result}
 
 
+# ---- dialogue pipeline (Phase 5.3) ------------------------------------------
+@app.get("/api/films/{project_id}/dialogue")
+async def get_dialogue(project_id: str, request: Request):
+    await require_auth(request)
+    data = films.get_dialogue(project_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    return data
+
+
+@app.post("/api/films/{project_id}/dialogue/extract")
+async def extract_dialogue(project_id: str, request: Request):
+    """Extraction-only dialogue run against the active approved screenplay.
+
+    Verbatim verification against the source: unverifiable lines are dropped
+    and reported, never invented. Idempotent on re-run over the same source.
+    """
+    await require_auth(request)
+    if films.get(project_id) is None:
+        raise HTTPException(status_code=404, detail="Film project not found.")
+    screenplay_entry = films.get_artifact(project_id, "screenplay")
+    if screenplay_entry is None or screenplay_entry.get("status") != "approved":
+        raise HTTPException(status_code=409, detail={
+            "error": "screenplay_not_approved",
+            "detail": "Dialogue extraction requires an approved screenplay artifact.",
+        })
+    source_version = screenplay_entry["version"]
+    screenplay = screenplay_entry["data"]
+    project = films.get(project_id)
+    characters = (project.get("continuity") or {}).get("characters", [])
+    provider = get_provider()
+    prompt = dialogue.EXTRACTION_PROMPT.format(screenplay=json.dumps(screenplay))
+    try:
+        result = await provider.complete(
+            "You are a strict script supervisor. Extraction only; never invent.",
+            prompt)
+        raw = dialogue.validate_extraction(json.loads(result["text"]))
+    except LLMError as exc:
+        status = 409 if getattr(exc, "code", "") in (
+            "artifact_locked", "stage_dependency_not_approved",
+            "stage_dependency_missing") else 502
+        raise HTTPException(status_code=status, detail=exc.to_dict())
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=502, detail={
+            "error": "dialogue_extraction_invalid",
+            "detail": "Extractor returned malformed output; nothing was stored.",
+        })
+    if raw is None:
+        raise HTTPException(status_code=502, detail={
+            "error": "dialogue_extraction_invalid",
+            "detail": "Extractor returned malformed output; nothing was stored.",
+        })
+    verified, reports = dialogue.verify_and_resolve(raw, screenplay, characters)
+    entry = films.replace_dialogue(project_id, source_version, verified)
+    if entry is None:
+        raise HTTPException(status_code=409, detail={
+            "error": "dialogue_locked",
+            "detail": "Dialogue artifact is approved; unapprove it before re-extracting.",
+        })
+    return {
+        "version": entry["version"],
+        "status": entry["status"],
+        "extracted": len(verified),
+        "submitted": len(raw),
+        "reports": reports,
+        "lines": entry["data"]["lines"],
+        "idempotent": entry.get("data", {}).get("source_screenplay_version") == source_version,
+    }
+
+
+@app.put("/api/films/{project_id}/dialogue/lines/{line_id}")
+async def update_dialogue_line(project_id: str, line_id: str, request: Request):
+    """Edit one line's text/metadata on the active draft; approved dialogue is
+    locked and must be unapproved first (existing convention)."""
+    await require_auth(request)
+    try:
+        patch = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    line = films.update_dialogue_line(project_id, line_id, patch)
+    if line is None:
+        if films.get(project_id) is None:
+            raise HTTPException(status_code=404, detail="Film project not found.")
+        if films.get_dialogue(project_id) and films.get_artifact(project_id, "dialogue") \
+                and films.get_artifact(project_id, "dialogue").get("status") == "approved":
+            raise HTTPException(status_code=409, detail="Dialogue artifact is approved.")
+        raise HTTPException(status_code=404,
+                            detail="Dialogue line not found or invalid patch.")
+    return {"line": line}
+
+
 def _raise_project_or_character_404(project_id: str, character_id: str) -> None:
     """Raise 404 for the actually missing resource; return when both exist."""
     if films.get(project_id) is None:
@@ -652,6 +744,13 @@ async def edit_artifact(project_id: str, kind: str, request: Request):
 @app.post("/api/films/{project_id}/artifacts/{kind}/approve")
 async def approve_artifact(project_id: str, kind: str, request: Request):
     await require_auth(request)
+    if kind == "dialogue":
+        dialogue_data = films.get_dialogue(project_id)
+        if dialogue_data is not None and dialogue_data.get("problems"):
+            raise HTTPException(status_code=422, detail={
+                "error": "dialogue_invalid",
+                "problems": dialogue_data["problems"],
+            })
     entry = films.set_artifact_status(project_id, kind, "approved")
     if entry is None:
         raise HTTPException(status_code=404, detail="Artifact not found.")
